@@ -470,7 +470,7 @@ class EQE(object):
         self.njuncs = self.eqe.shape[1]  # number of junction
 
         if sjuncs is None:
-            self.sjuncs.append(ordinal(self.njuncs + 1))
+            self.sjuncs.append(ordinal(self.njuncs))
         else:
             self.sjuncs.append(sjuncs)
 
@@ -662,12 +662,12 @@ class EQE(object):
         # Check if we have the same number of EQE curves as spectra
         if enforce_all_combinations or self.eqe.shape[1] != self.spectra.shape[1]:
             # Outer product for all combinations
-            integrand = np.einsum("ni,nj->nij", (self.eqe / convert.wavelength_to_photonenergy(self.wavelength) * 1e-1), self.spectra)
+            integrand = np.einsum("ni,nj->nij", (self.corrEQE / convert.wavelength_to_photonenergy(self.wavelength) * 1e-1), self.spectra)
             jsc = trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # Integrate along time axis
         else:
 
             # Pairwise integration: only integrate each EQE with its corresponding spectrum
-            integrand = self.eqe * self.spectra / convert.wavelength_to_photonenergy(self.wavelength) * 1e-1
+            integrand = self.corrEQE * self.spectra / convert.wavelength_to_photonenergy(self.wavelength) * 1e-1
             jsc = trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # Integrate along wavelength axis
 
         return jsc
@@ -989,7 +989,7 @@ class EQET(EQE):
         if self.spectra is None:
             raise ValueError("Load spectral information first.")
 
-        # check if spectra is available
+        # we only use the trace of the matrix, so spectra and temperature should have same dimension in one direction
         if not self.spectra.shape[1] == target_temperature.shape[0]:
             raise ValueError("Spectral and temperature array not the same length.")
 
