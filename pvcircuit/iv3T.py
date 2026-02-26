@@ -514,8 +514,9 @@ class IV3T(object):
             elif ltwo == 3:  # check
                 array2 = getattr(self, two[2])
                 akirch = array0 + array1 + array2
+                atol = 1e-3 * max(1.0, self.area)
                 for i, kzero in enumerate(akirch.flat):
-                    if not math.isclose(kzero, 0.0, abs_tol=1e-3):
+                    if not math.isclose(kzero, 0.0, abs_tol=atol):
                         array0.flat[i] = np.nan
                         array1.flat[i] = np.nan
                         array2.flat[i] = np.nan
