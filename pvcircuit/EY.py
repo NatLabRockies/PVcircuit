@@ -300,9 +300,11 @@ class Meteo:
                     pbar.update(len(chunk))
                     pbar.refresh()
 
-        self.outPowerMP = results
+        self.outPowerMP = results  # output power [W]
 
-        EnergyOut = trapezoid(self.outPowerMP, self.datetime.values.astype(np.int64)) / 1e9  # [Ws/cm²/yr]
+        power_density = self.outPowerMP / model.totalarea  # W --> W/cm²
+
+        EnergyOut = trapezoid(power_density, self.datetime.values.astype(np.int64)) / 1e9  # [Ws/cm²/yr]
 
         EnergyOut = EnergyOut / 3.6e3 / 1e3 * 1e4  # [Ws/cm²/yr] --> [kWh/m²/yr]
 
