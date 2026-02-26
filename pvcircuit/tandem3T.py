@@ -6,7 +6,6 @@ This is the PVcircuit Package.
 
 import copy
 import math  # simple math
-import os
 from time import time
 from typing import List
 
