@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]  # Chose windows-latest, ubuntu-latest, macos-latest.
-        python-version: ['3.9', '3.10', '3.11', '3.12']  # Test multiple Python versions
+        python-version: ['3.12', '3.13']  # Test multiple Python versions
       fail-fast: false
     runs-on: ${{ matrix.os }}
 
