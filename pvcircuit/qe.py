@@ -763,6 +763,7 @@ class EQET(EQE):
         temperature_sorter = np.argsort(self.temperature)
         self.temperature = self.temperature[temperature_sorter]
         self.eqe = self.eqe[:, temperature_sorter]
+        self.corrEQE = self.corrEQE[:, temperature_sorter]
 
     def _qe_from_model(self, temperature: np.ndarray) -> EQET:
 
