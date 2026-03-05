@@ -537,7 +537,6 @@ class EQE(object):
             y_target = y_grad[a_idx : b_idx - 1 : -1]
 
             if fit_gaussian:
-
                 # initial guesses from weighted arithmetic mean and weighted sample sigma
                 mean = sum(x_target * y_target) / sum(y_target)
                 sigma = np.sqrt(sum(y_target * (x_target - mean) ** 2) / sum(y_target))
@@ -594,7 +593,6 @@ class EQE(object):
         if self.njuncs == 1:
             self.corrEQE = raw
         else:
-
             for ijunc in range(self.njuncs):
                 if ijunc == 0:  # 1st ijunction
                     self.corrEQE[:, ijunc] = raw[:, ijunc]
@@ -665,7 +663,6 @@ class EQE(object):
             integrand = np.einsum("ni,nj->nij", (self.corrEQE / convert.wavelength_to_photonenergy(self.wavelength) * 1e-1), self.spectra)
             jsc = trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # Integrate along time axis
         else:
-
             # Pairwise integration: only integrate each EQE with its corresponding spectrum
             integrand = self.corrEQE * self.spectra / convert.wavelength_to_photonenergy(self.wavelength) * 1e-1
             jsc = trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # Integrate along wavelength axis
@@ -735,7 +732,6 @@ class EQE(object):
 
 
 class EQET(EQE):
-
     def __init__(self, wavelength: np.ndarray, eqe: np.ndarray, temperature: np.ndarray, name: str = "EQE", sjuncs: Union[List[str], None] = None):
 
         # ensure numpy
@@ -1010,19 +1006,19 @@ class EQET(EQE):
             for i in range(current_density.shape[1]):
                 y = current_density[:, i]
                 best_bic = np.inf
-                best_coeff = None
+                best_coeff = np.zeros(min(degrees) + 1)
 
                 # Loop over all polynomial degrees and fit data
                 for degree in degrees:
                     coeffs, residuals, rank, _, _ = np.polyfit(self.temperature, y, degree, full=True)
-                    y_fit = np.polyval(coeffs, self.temperature)
 
                     if rank < degree + 1:
                         bic = np.inf
+                    elif len(residuals) == 0:
+                        bic = -np.inf
                     else:
-                        # add offest to prevent log(0)
-                        rss = residuals + 1e-12
-                        # Calculate Bayesian information criterion (BIC)
+                        # add offset to prevent log(0)
+                        rss = float(residuals[0]) + 1e-12
                         k = degree + 1
                         bic = n * np.log(rss / n) + k * np.log(n)
 
