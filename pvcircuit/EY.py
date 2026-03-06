@@ -19,7 +19,7 @@ from tqdm import tqdm, trange
 
 import pvcircuit as pvc
 
-warnings.warn("The 'EY.py' module is deprecated and will be change in future version.", DeprecationWarning, stacklevel=2)
+# warnings.warn("The 'EY.py' module is deprecated and will be change in future version.", DeprecationWarning, stacklevel=2)
 
 
 def VMloss(model: Union["pvc.Tandem3T", "pvc.Multi2T"], oper: str, ncells: int) -> float:
