@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import constants
+from typing import Union
 
 # Constants
 K_Q = constants.k / constants.e
@@ -34,28 +35,28 @@ def Vth(TC: float) -> float:
     return K_Q * TK(TC)
 
 
-def wavelength_to_photonenergy(wavelength: float) -> float:
+def wavelength_to_photonenergy(wavelength: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
     """
     Convert wavelength [nm] to photon energy [eV]
 
     Args:
-        wavelength (float): Wavelength in [nm]
+        wavelength (Union[float, np.ndarray]): Wavelength in [nm]
 
     Returns:
-        float: Photon energy in [eV]
+        Union[float, np.ndarray]: Photon energy in [eV]
     """
     return HC_E / (wavelength * 1e-9)
 
 
-def photonenergy_to_wavelength(photonenergy: float) -> float:
+def photonenergy_to_wavelength(photonenergy: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
     """
     Convert photon energy [eV] to wavelength [nm]
 
     Args:
-        photonenergy (float): Photon energy in [eV]
+        photonenergy (Union[float, np.ndarray]): Photon energy in [eV]
 
     Returns:
-        float: Wavelength in [nm]
+        Union[float, np.ndarray]: Wavelength in [nm]
     """
     return HC_E / (photonenergy * 1e-9)
 
