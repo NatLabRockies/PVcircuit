@@ -8,9 +8,11 @@ import copy
 import math  # simple math
 import os
 import re
+from typing import Any
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt  # plotting
+from matplotlib.legend import Legend
 import numpy as np  # arrays
 import pandas as pd  # data frames
 
@@ -80,6 +82,24 @@ class IV3T(object):
     Idevlist = ["Iro", "Izo", "Ito"]
     Vdevlist = ["Vzt", "Vrz", "Vtr"]
 
+    # Array attributes set dynamically in __init__ via setattr; declared here for type checkers
+    Iro: np.ndarray
+    Izo: np.ndarray
+    Ito: np.ndarray
+    Vzt: np.ndarray
+    Vrz: np.ndarray
+    Vtr: np.ndarray
+    IA: np.ndarray
+    IB: np.ndarray
+    VA: np.ndarray
+    VB: np.ndarray
+    Ptot: np.ndarray
+    Ixhex: np.ndarray
+    Iyhex: np.ndarray
+    Vxhex: np.ndarray
+    Vyhex: np.ndarray
+    shape: tuple[int, ...]
+
     def __init__(self, name="iv3T", meastype="CZ", shape=0, fillname="", area=1):
 
         self.name = name
@@ -90,7 +110,7 @@ class IV3T(object):
         if np.ndim(shape) == 0:  # not iterable
             self.shape = (shape,)
         else:  # iterable
-            self.shape = tuple(shape)
+            self.shape = tuple(shape)  # type: ignore[arg-type]
 
         for key in self.arraykeys:
             setattr(self, key, np.full(shape, np.nan, dtype=np.float64))
@@ -297,7 +317,6 @@ class IV3T(object):
             z0 = np.nanmin(zd) * scale
             z1 = np.nanmax(zd) * scale
 
-            numlines = 0
             for ycon in [step * i for i in range(-maxlines, maxlines) if y0 <= step * i <= y1]:
 
                 xalt0 = -ycon - z1
@@ -532,7 +551,7 @@ class IV3T(object):
         calculate Ptot using oper = 'dev2load' or 'load2dev'
         """
 
-        if meastype != None:  # optionally change the attribute here
+        if meastype is not None:  # optionally change the attribute here
             self.meastype = meastype
 
         if oper == "dev2load":
@@ -564,7 +583,7 @@ class IV3T(object):
         add an extra character to swap the loads: 'CRo','CTo','CZo', 'CFo'
         """
 
-        if meastype == None:  # change the attribute here
+        if meastype is None:  # change the attribute here
             meastype = self.meastype
 
         if "A" not in load.upper() and "B" not in load.upper():
@@ -606,7 +625,7 @@ class IV3T(object):
             print("VorI err", VorI)
             return 1  # invalid VorI
 
-        if meastype != None:  # change the attribute here
+        if meastype is not None:  # change the attribute here
             self.meastype = meastype
 
         smatrix = self.meastype[0:2].upper().replace("F", "T") + "_" + VorI + oper
@@ -635,7 +654,7 @@ class IV3T(object):
 
         try:
             matrix = eval(smatrix)
-        except:
+        except Exception:
             print("matrix err", smatrix)
             return 3  # could not evaluate smatrix
 
@@ -710,8 +729,8 @@ class IV3T(object):
             return 3
 
         # x columns...convert from string labels
-        colA = np.float64(np.array(dfA.columns))
-        colB = np.float64(np.array(dfB.columns))
+        colA = np.array(dfA.columns, dtype=np.float64)
+        colB = np.array(dfB.columns, dtype=np.float64)
         y0 = colA[0]  # first
         y1 = colA[-1]  # last
         yn = len(colA)
@@ -768,11 +787,11 @@ class IV3T(object):
         """
 
         # defaults
-        if xkey == None:
+        if xkey is None:
             xkey = self.xkey
-        if ykey == None:
+        if ykey is None:
             ykey = self.ykey
-        if zkey == None:
+        if zkey is None:
             zkey = "Ptot"
 
         dim = len(self.shape)
@@ -822,12 +841,12 @@ class IV3T(object):
             zscale = 1.0
             lstep = 0.5
 
-        x = self.x * scale  # 1D
-        y = self.y * scale  # 1D
+        _x = self.x * scale  # 1D
+        _y = self.y * scale  # 1D
         xx = getattr(self, xkey.replace("f", "t")) * scale  # 2D
         yy = getattr(self, ykey.replace("f", "t")) * scale  # 2D
         zz = getattr(self, zkey.replace("f", "t")) * zscale  # 2D
-        extent = [np.nanmin(xx), np.nanmax(xx), np.nanmin(yy), np.nanmax(yy)]
+        extent = (np.nanmin(xx), np.nanmax(xx), np.nanmin(yy), np.nanmax(yy))
         if log:
             zlab = "log(|" + zlab + "|)"
             lz = np.log10(np.abs(zz))
@@ -852,7 +871,7 @@ class IV3T(object):
             fig.set_figheight(4)
             # handles, labels = ax.get_legend_handles_labels()  # legend items to be added
             oldlegend = ax.get_legend()
-            if type(oldlegend) is mpl.legend.Legend:
+            if isinstance(oldlegend, Legend):
                 texts = oldlegend.get_texts()
                 lines = oldlegend.get_lines()
                 for text, line in zip(texts, lines):
@@ -892,7 +911,7 @@ class IV3T(object):
                 imag = ax.scatter(xx, yy, s=msize, c=zz, marker="h", cmap=cmap, vmin=0, vmax=Pmax)
             objs.append(imag)  # output image as object
 
-            if bar == True:
+            if bar:
                 # colorbar
                 cb = plt.colorbar(imag, ax=ax, shrink=0.6, ticks=levels)
                 cb.set_label(zlab)
@@ -934,7 +953,7 @@ class IV3T(object):
     def plotIVslice(self, step=2, log=True, inplots=None, labelplus="", size="x-large"):
         # plot iv slices through box iv3T data
         if len(self.shape) == 2:
-            na, nb = self.shape
+            na, nb = self.shape[0], self.shape[1]
         else:
             return 1  # must be box
         xkey = self.xkey
@@ -942,7 +961,8 @@ class IV3T(object):
         scale = 1000.0
 
         # fig, (Lax, Rax) = plt.subplots(1, 2, constrained_layout=True)
-        if inplots == None:
+        kwargs: dict[str, Any]
+        if inplots is None:
             Lfig, Lax = plt.subplots()  # constrained_layout=True)
             Rfig, Rax = plt.subplots()  # constrained_layout=True)
             kwargs = {"lw": 0, "marker": "o"}  # markers for data
@@ -993,7 +1013,7 @@ class IV3T(object):
             kwargs["label"] = labelplus + xkey + "={0:.1f}".format(self.x[i])
             Lax.plot(Vyp[:, i], Iyp[:, i], **kwargs)
 
-        if inplots == None:
+        if inplots is None:
             Rax.set_xlabel(self.loadlabel(Vxkey) + " (V)", size=size)
             Lax.set_xlabel(self.loadlabel(Vykey) + " (V)", size=size)
             Rax.axvline(0, ls="--", color="gray", label="_vzero")
