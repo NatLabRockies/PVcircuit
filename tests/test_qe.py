@@ -1,12 +1,14 @@
-from pathlib import Path
-
+import matplotlib
+matplotlib.use('Agg')  # Add this line at the top, before importing pyplot
 import matplotlib.pyplot as plt
+
 import numpy as np
 import pandas as pd
 import pytest
 
 import pvcircuit as pvc
 from pvcircuit import EQE
+from pvcircuit.qe import wvl, AM15G
 
 
 def get_measured_eqe():
@@ -52,11 +54,11 @@ def test_Jint():
     eq = np.ones_like(waves)
     eqe = EQE(waves, eq)
 
-    eqe.add_spectra(pvc.qe.wvl, pvc.qe.AM15G.T)
+    eqe.add_spectra(wvl, AM15G.T)
     test_res = np.array([46.42154037])
     np.testing.assert_array_almost_equal(test_res, eqe.Jint())
 
-    eqe.add_spectra(pvc.qe.wvl, np.tile(pvc.qe.AM15G.T, [5, 1]).T)
+    eqe.add_spectra(wvl, np.tile(AM15G.T, [5, 1]).T)
     test_res = np.array([[46.42154037, 46.42154037, 46.42154037, 46.42154037, 46.42154037]])
     np.testing.assert_array_almost_equal(test_res, eqe.Jint())
 
