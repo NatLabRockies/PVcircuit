@@ -10,7 +10,7 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from time import time
-from typing import Callable, Dict, List, Tuple, Union
+from typing import Callable, Dict, List, Sequence, Tuple, Union
 
 import matplotlib as mpl  # plotting
 import matplotlib.pyplot as plt  # plotting
@@ -63,7 +63,7 @@ try:
     AM0 = refspec[:, 0]  # dfrefspec['space'].to_numpy(dtype=np.float64, copy=True)  # 1348.0 W/m2
     AM15G = refspec[:, 1]  # dfrefspec['global'].to_numpy(dtype=np.float64, copy=True) # 1000.5 W/m2
     AM15D = refspec[:, 2]  # dfrefspec['direct'].to_numpy(dtype=np.float64, copy=True) # 900.2 W/m2
-except:
+except Exception:
     print(pvc.pvcpath)
     print(pvc.datapath)
     print(ASTMfile)
@@ -78,7 +78,7 @@ def ordinal(n: int) -> str:
     return f"{n}{suffix}"
 
 
-def _eq_solve_Eg(Eg: float, *data: Tuple[np.ndarray, np.ndarray]) -> float:
+def _eq_solve_Eg(Eg: float, *data: np.ndarray) -> float:
     x, y = data
     return trapezoid(x * y, x) / trapezoid(y, x) - Eg
 
@@ -87,7 +87,7 @@ def _gaussian(x: np.ndarray, a: float, x0: float, sigma: float) -> np.ndarray:
     return 1 * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
 
 
-def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[float]], TC: float, Eguess: float = 1.0, kTfilter: int = 3, bplot: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[float]], TC: float, Eguess: float = 1.0, kTfilter: int = 3, bplot: bool = False) -> Union[Tuple[np.ndarray, np.ndarray], str]:
     """
     calculate detailed-balance reverse saturation current
     from EQE vs xEQE
@@ -156,12 +156,12 @@ def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[floa
     return Jdb, Egnew
 
 
-def PintMD(Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> np.ndarray:
+def PintMD(Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> Union[np.ndarray, str]:
     # optical power of spectrum over full range
     return JintMD(None, None, Pspec, xspec)
 
 
-def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], None], Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> np.ndarray:
+def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], None], Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> Union[np.ndarray, str]:
     """
     integrate over spectrum or spectra
     if EQE is None -> calculate Power in [W/m2]
@@ -234,7 +234,7 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
     if xspec.ndim != 1:  # need 1D with same length as Pspec(lam)
         return "dims in xspec:" + str(xspec.ndim) + "!=1"
     elif len(xspec) != nSlams:
-        return "nSlams:" + str(len(xspec.ndim)) + "!=" + str(nSlams)
+        return "nSlams:" + str(len(xspec)) + "!=" + str(nSlams)
 
     if xEQE.ndim != 1:  # need 1D with same length as EQE(lam)
         return "dims in xEQE:" + str(xEQE.ndim) + "!=1"
@@ -283,7 +283,7 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
 
 
 @lru_cache(maxsize=100)
-def JdbFromEg(TC: float, Eg: float, dbsides: float = 1.0, method: str = None) -> float:
+def JdbFromEg(TC: float, Eg: float, dbsides: float = 1.0, method: Union[str, None] = None) -> float:
     """
     return the detailed balance dark current
     assuming a square EQE
@@ -337,7 +337,7 @@ def EgFromJdb(TC: float, Jdb: float, Eg: float = 1.0, eps: float = 1e-6, itermax
         x1 = off + np.log(1.0 + x0 + x0 * x0 / 2.0)
         try:
             tol = abs((x1 - x0) / x0)
-        except:
+        except Exception:
             tol = abs(x1 - x0)
         if tol < eps:
             return x1 * Vthlocal
@@ -346,7 +346,7 @@ def EgFromJdb(TC: float, Jdb: float, Eg: float = 1.0, eps: float = 1e-6, itermax
     return None
 
 
-def ensure_numpy_2drow(array: Union[np.ndarray, List[float]]) -> np.ndarray:
+def ensure_numpy_2drow(array: Union[np.ndarray, pd.Index, pd.DataFrame, Sequence[Union[int, float]]]) -> np.ndarray:
 
     # ensure numpy
     array = np.array(array)
@@ -355,7 +355,7 @@ def ensure_numpy_2drow(array: Union[np.ndarray, List[float]]) -> np.ndarray:
     return array
 
 
-def ensure_numpy_2dcol(array: Union[np.ndarray, List[float]]) -> np.ndarray:
+def ensure_numpy_2dcol(array: Union[np.ndarray, pd.Index, pd.DataFrame, Sequence[Union[int, float]]]) -> np.ndarray:
 
     # ensure numpy
     array = np.array(array)
@@ -382,7 +382,7 @@ class EQE(object):
 
     """
 
-    def __init__(self, wavelength: np.ndarray, eqe: np.ndarray, name: str = "EQE", sjuncs: Union[List[str], None] = None):
+    def __init__(self, wavelength: Union[np.ndarray, pd.Index], eqe: Union[np.ndarray, pd.DataFrame], name: str = "EQE", sjuncs: Union[List[str], None] = None):
         """It creats the EQE class. ntegrate over spectrum or spectra
         rawEQE (numpy.array):  2D(lambda)(junction) raw input rawEQE (not LC corrected)
         xEQE(numpy.array)      xEQE        # wavelengths [nm] for rawEQE data
@@ -403,7 +403,7 @@ class EQE(object):
 
         self.njuncs = self.eqe.shape[1]  # number of junction
 
-        if sjuncs == None:
+        if sjuncs is None:
             self.sjuncs = [ordinal(junc + 1) for junc in range(self.njuncs)]
         else:
             self.sjuncs = sjuncs  # names of junctions
@@ -413,7 +413,7 @@ class EQE(object):
         self.LCcorr()  # calculate LC with zero etas
         self.spectra = None
 
-    def add_spectra(self, wavelength: np.ndarray = None, spectra: np.ndarray = None) -> None:
+    def add_spectra(self, wavelength: Union[np.ndarray, None] = None, spectra: Union[np.ndarray, None] = None) -> None:
         """
         Add spectral data
 
@@ -489,7 +489,7 @@ class EQE(object):
         # Define the Gaussian function
         for i in range(self.eqe.shape[1]):
             y = self.eqe[:, i]
-            x = convert.wavelength_to_photonenergy(self.wavelength.flatten())
+            x = np.asarray(convert.wavelength_to_photonenergy(self.wavelength.flatten()))
 
             # convert wavelength to photon energy
             y_grad = -1 * np.gradient(y)
@@ -548,7 +548,7 @@ class EQE(object):
 
                 if plot_fits:
                     fig, ax = plt.subplots(1, 2, layout="constrained")
-                    ax[0].plot(convert.wavelength_to_photonenergy(self.wavelength.flatten()), self.eqe[:, i])
+                    ax[0].plot(np.asarray(convert.wavelength_to_photonenergy(self.wavelength.flatten())), self.eqe[:, i])
                     ax[0].plot(x, y_grad, "--")
                     ax[1].plot(x, y_grad, "--")
                     ax[1].plot(x_fit, y_fit)
@@ -584,7 +584,7 @@ class EQE(object):
         # calculate LC corrected EQE
         etas = self.etas
         # with self.debugout: print(junc,dist,val)
-        if junc == None or dist == None or val == None:
+        if junc is None or dist is None or val is None:
             pass
         else:
             etas[junc, dist] = val  # assign value
@@ -662,12 +662,12 @@ class EQE(object):
         # Check if we have the same number of EQE curves as spectra
         if enforce_all_combinations or self.eqe.shape[1] != self.spectra.shape[1]:
             # Outer product for all combinations
-            integrand = np.einsum("ni,nj->nij", (self.corrEQE / convert.wavelength_to_photonenergy(self.wavelength) * 1e-1), self.spectra)
+            integrand = np.einsum("ni,nj->nij", (self.corrEQE / np.asarray(convert.wavelength_to_photonenergy(self.wavelength)) * 1e-1), self.spectra)
             jsc = trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # Integrate along time axis
         else:
 
             # Pairwise integration: only integrate each EQE with its corresponding spectrum
-            integrand = self.corrEQE * self.spectra / convert.wavelength_to_photonenergy(self.wavelength) * 1e-1
+            integrand = self.corrEQE * self.spectra / np.asarray(convert.wavelength_to_photonenergy(self.wavelength)) * 1e-1
             jsc = trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # Integrate along wavelength axis
 
         return jsc
@@ -728,7 +728,7 @@ class EQE(object):
     def plot_sr(self) -> Tuple[plt.Figure, plt.Axes]:
         # plot EQE on top of a spectrum
 
-        sr = self.eqe * 1 / convert.wavelength_to_photonenergy(self.wavelength)
+        sr = self.eqe * 1 / np.asarray(convert.wavelength_to_photonenergy(self.wavelength))
         fig, ax = plt.subplots()
         ax.plot(self.wavelength, sr)
         return fig, ax
@@ -736,7 +736,7 @@ class EQE(object):
 
 class EQET(EQE):
 
-    def __init__(self, wavelength: np.ndarray, eqe: np.ndarray, temperature: np.ndarray, name: str = "EQE", sjuncs: Union[List[str], None] = None):
+    def __init__(self, wavelength: Union[np.ndarray, pd.Index], eqe: Union[np.ndarray, pd.DataFrame], temperature: np.ndarray, name: str = "EQE", sjuncs: Union[List[str], None] = None):
 
         # ensure numpy
         temperature = np.atleast_1d(temperature) if not isinstance(temperature, np.ndarray) else temperature
@@ -765,9 +765,9 @@ class EQET(EQE):
         self.eqe = self.eqe[:, temperature_sorter]
         self.corrEQE = self.corrEQE[:, temperature_sorter]
 
-    def _qe_from_model(self, temperature: np.ndarray) -> EQET:
+    def _qe_from_model(self, temperature: np.ndarray) -> "EQET":  # type: ignore[override]
 
-        pass # pass for now
+        pass  # not yet implemented
 
     # def controls(self, Pspec='global', ispec=0, specname=None, xspec=wvl):
     #     '''
@@ -1015,7 +1015,7 @@ class EQET(EQE):
                 # Loop over all polynomial degrees and fit data
                 for degree in degrees:
                     coeffs, residuals, rank, _, _ = np.polyfit(self.temperature, y, degree, full=True)
-                    y_fit = np.polyval(coeffs, self.temperature)
+                    _y_fit = np.polyval(coeffs, self.temperature)
 
                     if rank < degree + 1:
                         bic = np.inf
@@ -1054,10 +1054,10 @@ class EQET(EQE):
         Returns:
             np.ndarray: spectral response data
         """
-        sr = self.eqe.T / convert.photonenergy_to_wavelength(self.wavelength.flatten())
+        sr = self.eqe.T / np.asarray(convert.photonenergy_to_wavelength(self.wavelength.flatten()))
         return sr.T
 
-    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: Union[float, np.ndarray], sjuncs: Union[str, None] = None) -> None:
+    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: Union[float, np.ndarray] = 25, sjuncs: Union[str, None] = None) -> None:  # type: ignore[override]
         """
         Add EQE(T)
 
@@ -1074,7 +1074,7 @@ class EQET(EQE):
         self.temperature = np.concatenate((self.temperature, temperature_add))
         self._sort_by_temperature()
 
-    def plot(self, fig: Union[plt.Figure, None] = None, ax: Union[plt.Axes, None] = None) -> Tuple[plt.Axes, plt.Axes]:
+    def plot(self, fig: Union[plt.Figure, None] = None, ax: Union[plt.Axes, None] = None) -> Tuple[plt.Axes, plt.Axes]:  # type: ignore[override]
         """
         Plot the EQE(T). Lines are colored by temperature.
 
@@ -1119,7 +1119,7 @@ class EQET(EQE):
         rax = ax.twinx()  # right axis
         return ax, rax
 
-    def plot_sr(self, fig: Union[plt.Figure, None] = None, ax: Union[plt.Axes, None] = None) -> None:
+    def plot_sr(self, fig: Union[plt.Figure, None] = None, ax: Union[plt.Axes, None] = None) -> Tuple[plt.Figure, plt.Axes]:
         """
         Plot the spectral response SR(T). Lines are colored by temperature.
 
@@ -1322,7 +1322,7 @@ def _calc_mic(temperature: np.ndarray, predicted: np.ndarray, actual: np.ndarray
     param_penalty = 1
     # mic = len(temperature) * (np.log(mse + np.finfo(float).eps))**1 + param_penalty * len(params)  # Akaike Information Criterion wiht additional parameter penalty
     mic = len(temperature) * np.log(mse + np.finfo(float).eps) + param_penalty * len(params) * np.log(len(temperature))  # Bayesian Information Criterion wiht additional parameter penalty
-    return mic, mse
+    return float(mic), float(mse)
 
 
 class TemperatureModel:
@@ -1382,7 +1382,7 @@ class TemperatureModel:
             ax.set_ylabel("Bandgap/sigma (eV)")
 
         if model_types is None:
-            model_types = ModelType
+            model_types = list(ModelType)
         else:
             # ensure list
             model_types = model_types if isinstance(model_types, list) else [model_types]
