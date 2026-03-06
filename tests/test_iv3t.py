@@ -2,6 +2,9 @@ import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+
+# Set to True once to write baseline test files, then revert to False
+REGENERATE_TEST_FILES = False
 import numpy as np
 import pytest
 
@@ -28,9 +31,9 @@ def test_iv3t_str(iv3t):
 
     test_file = "iv3t_str.txt"
 
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -47,9 +50,9 @@ def test_iv3t_setter(dev3T, iv3t):
         iv3t.set(**{k: 1})
 
     test_file = "iv3t_setter.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -74,9 +77,9 @@ def test_line(iv3t):
     iv3t.line("Vzt", 0, 1.2, 11, "Vrz", "0")
 
     test_file = "iv3t_line.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -89,9 +92,9 @@ def test_box(iv3t):
     iv3t.box("IA", -25e-3, 25e-3, 55, "IB", -30e-3, 30e-3, 55)
 
     test_file = "iv3t_box.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -117,9 +120,9 @@ def test_mpp(iv3t, dev3T):
     # mpp = iv3t.MPP()
 
     test_file = "iv3t_mpp.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -137,9 +140,9 @@ def test_resize(iv3t, dev3T):
     np.testing.assert_array_equal(iv3t.sizes(["VA"]), [50, 50])
 
     test_file = "iv3t_resize.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -175,9 +178,9 @@ def test_calc(iv3t, dev3T):
     iv3t.delete(5)
 
     test_file = "iv3t_calc.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -277,9 +280,9 @@ def test_fromcsv():
     iv3t = pvc.IV3T.from_csv("MS874_V_dataiv", path, fileA, fileB, "V", "CZ", area=1)  # Iscale=1000./A)
 
     test_file = "iv3t_fromcsv.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -305,16 +308,43 @@ def test_plot():
     np.testing.assert_equal(len(ax.lines), 62)
 
 
+def generate_test_files():
+    """Generate all baseline test files. Run: python tests/test_iv3t.py"""
+    global REGENERATE_TEST_FILES
+    REGENERATE_TEST_FILES = True
+
+    dev3T = Tandem3T()
+    iv3t = IV3T()
+
+    print("Generating iv3t_str.txt...")
+    test_iv3t_str(iv3t)
+    iv3t = IV3T()
+    print("Generating iv3t_setter.txt...")
+    test_iv3t_setter(dev3T, iv3t)
+    iv3t = IV3T()
+    print("Generating iv3t_line.txt...")
+    test_line(iv3t)
+    iv3t = IV3T()
+    print("Generating iv3t_box.txt...")
+    test_box(iv3t)
+    iv3t = IV3T()
+    print("Generating iv3t_mpp.txt...")
+    test_mpp(iv3t, dev3T)
+    iv3t = IV3T()
+    print("Generating iv3t_resize.txt...")
+    test_resize(iv3t, dev3T)
+    iv3t = IV3T()
+    print("Generating iv3t_calc.txt...")
+    test_calc(iv3t, dev3T)
+    print("Generating iv3t_fromcsv.txt...")
+    test_fromcsv()
+
+    REGENERATE_TEST_FILES = False
+    print("Done!")
+
+
 if __name__ == "__main__":
-
-    pytest.main(["-v", __file__])
-
-    # iv3t = IV3T()
-    # dev3T = Tandem3T()
-    # iv3t.line("Vzt", 0, 1.5, 20, "Vrz", "0")
-    # iv3t.convert("V", "dev2load")
-    # dev3T.J3Tabs(iv3t)
-    # iv3t.convert("I", "dev2load")
+    generate_test_files()
     # iv3t.Pcalc()
     # dev3T.I3Trel(iv3t)
 

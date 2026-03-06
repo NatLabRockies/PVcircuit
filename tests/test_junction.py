@@ -2,6 +2,9 @@ import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+
+# Set to True once to write baseline test files, then revert to False
+REGENERATE_TEST_FILES = False
 import numpy as np
 import pandas as pd
 import pvcircuit as pvc
@@ -38,9 +41,9 @@ def junction():
 def test_junction_str(junction):
 
     test_file = "Junction.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(junction.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(junction.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -177,10 +180,24 @@ def test_Vmid(junction):
 
 
 
+def generate_test_files():
+    """Generate all baseline test files. Run: python tests/test_junction.py"""
+    global REGENERATE_TEST_FILES
+    REGENERATE_TEST_FILES = True
+
+    junction = pvc.junction.Junction()
+    print("Generating Junction.txt...")
+    test_junction_str(junction)
+
+    REGENERATE_TEST_FILES = False
+    print("Done!")
+
+
 if __name__ == "__main__":
 
     pytest.main(['-v', __file__])
 
+    generate_test_files()
 
     # root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

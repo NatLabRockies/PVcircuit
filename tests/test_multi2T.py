@@ -3,6 +3,9 @@ import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+
+# Set to True once to write baseline test files, then revert to False
+REGENERATE_TEST_FILES = False
 import numpy as np
 import pytest
 from pvlib import ivtools, pvsystem
@@ -61,9 +64,9 @@ def test_2T_from_single_junction(junction):
 def test_multi2T_str(dev2T):
 
     test_file = "Multi2T_str.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(dev2T.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(dev2T.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -189,8 +192,17 @@ def i2trun():
     dev2T.I2Troot(2.4)
 
 
-if __name__ == "__main__":
+def generate_test_files():
+    """Generate all baseline test files. Run: python tests/test_multi2T.py"""
+    global REGENERATE_TEST_FILES
+    REGENERATE_TEST_FILES = True
 
-    i2trun()
-    plot_2T()
-    print("done")
+    dev2T = Multi2T()
+    print("Generating Multi2T_str.txt..."); test_multi2T_str(dev2T)
+
+    REGENERATE_TEST_FILES = False
+    print("Done!")
+
+
+if __name__ == "__main__":
+    generate_test_files()

@@ -3,6 +3,9 @@ import re
 from pathlib import Path
 
 import numpy as np
+
+# Set to True once to write baseline test files, then revert to False
+REGENERATE_TEST_FILES = False
 import pytest
 
 import pvcircuit as pvc
@@ -32,9 +35,9 @@ def junction():
 def test_tandem3T_str(dev3T):
 
     test_file = "Tandem3T_str.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(dev3T.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(dev3T.__str__())
 
     # read fixed test case for s-type
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
@@ -80,9 +83,9 @@ def test_V3T(dev3T, iv3t):
     dev3T.V3T(iv3t)
 
     test_file = "Tandem3T_V3T-s.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding='utf8') as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     # read fixed test case for s-type
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
@@ -94,9 +97,9 @@ def test_V3T(dev3T, iv3t):
     dev3T.V3T(iv3t)
 
     test_file = "Tandem3T_V3T-r.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding='utf8') as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     # read fixed test case for r-type
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
@@ -118,9 +121,9 @@ def test_J3Tabs(dev3T, iv3t):
     dev3T.J3Tabs(iv3t)
 
     test_file = "Tandem3T_J3TAabs-s.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     # read fixed test case for s-type
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
@@ -132,9 +135,9 @@ def test_J3Tabs(dev3T, iv3t):
     dev3T.J3Tabs(iv3t)
 
     test_file = "Tandem3T_J3TAabs-r.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     # read fixed test case for r-type
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
@@ -156,9 +159,9 @@ def test_I3Trel(dev3T, iv3t):
     dev3T.I3Trel(iv3t)
 
     test_file = "Tandem3T_I3Trel-s.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     # read fixed test case for s-type
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
@@ -170,9 +173,9 @@ def test_I3Trel(dev3T, iv3t):
     dev3T.I3Trel(iv3t)
 
     test_file = "Tandem3T_I3Trel-r.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(iv3t.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(iv3t.__str__())
 
     # read fixed test case for r-type
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
@@ -195,11 +198,11 @@ def test_VM(dev3T):
 
         vm_fname = "Tandem3T_iv3t_vm_{}.txt".format("".join(map(str, ratio)))
         vmpp_fname = "Tandem3T_iv3t_vmpp_{}.txt".format("".join(map(str, ratio)))
-        # write test case
-        # with open(pvc.pvcpath.parent.joinpath("tests","test_files", vm_fname), "w", encoding="utf8") as fout:
-        #     fout.write(iv3t_vm.__str__())
-        # with open(pvc.pvcpath.parent.joinpath("tests","test_files", vmpp_fname), "w", encoding="utf8") as fout:
-        #     fout.write(iv3t_vmpp.__str__())
+        if REGENERATE_TEST_FILES:
+            with open(pvc.pvcpath.parent.joinpath("tests", "test_files", vm_fname), "w", encoding="utf8") as fout:
+                fout.write(iv3t_vm.__str__())
+            with open(pvc.pvcpath.parent.joinpath("tests", "test_files", vmpp_fname), "w", encoding="utf8") as fout:
+                fout.write(iv3t_vmpp.__str__())
 
         # read fixed test case for s-type
         with open(pvc.pvcpath.parent.joinpath("tests", "test_files", vm_fname), "r", encoding="utf8") as fin:
@@ -259,9 +262,9 @@ def test_VI0(dev3T):
         iv3t = dev3T.VI0(point)
 
         test_file = f"Tandem3T_VI0_{point}.txt"
-        # write test case
-        # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-        #     fout.write(iv3t.__str__())
+        if REGENERATE_TEST_FILES:
+            with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+                fout.write(iv3t.__str__())
 
         # read fixed test case for s-type
         with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
@@ -288,9 +291,9 @@ def test_VIpoints(dev3T):
         iv3t = dev3T.VIpoint(current_keys[combo[0]], current_keys[combo[1]], voltage_keys[combo[2]])
 
         test_file = f"Tandem3T_VIpoint_{iv3t.name}.txt"
-        # write test case
-        # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-        #     fout.write(iv3t.__str__())
+        if REGENERATE_TEST_FILES:
+            with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+                fout.write(iv3t.__str__())
 
         with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
             test_str = fin.read()
@@ -311,9 +314,9 @@ def test_specialpoints(dev3T):
     special_points = dev3T.specialpoints()
 
     test_file = "Tandem3T_specialpoints.txt"
-    # write test case
-    # with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "w", encoding="utf8") as fout:
-    #     fout.write(special_points.__str__())
+    if REGENERATE_TEST_FILES:
+        with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
+            fout.write(special_points.__str__())
 
     with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
@@ -321,32 +324,71 @@ def test_specialpoints(dev3T):
     np.testing.assert_string_equal(re.sub(r"\s+", " ", test_str), re.sub(r"\s+", " ", special_points.__str__()))
 
 
-if __name__ == "__main__":
+def generate_test_files():
+    """Generate all baseline test files. Run: python tests/test_tandem3T.py"""
+    global REGENERATE_TEST_FILES
+    REGENERATE_TEST_FILES = True
+
     dev3T = Tandem3T()
     iv3t = IV3T()
 
-    current_keys = [k for k in iv3t.arraykeys if k.startswith("I") and len(k) > 2]
-    voltage_keys = [k for k in iv3t.arraykeys if k.startswith("V") and len(k) > 2]
+    print("Generating Tandem3T_str.txt...")
+    test_tandem3T_str(dev3T)
+    dev3T = Tandem3T()
+    iv3t = IV3T()
+    print("Generating Tandem3T_V3T*.txt...")
+    test_V3T(dev3T, iv3t)
+    dev3T = Tandem3T()
+    iv3t = IV3T()
+    print("Generating Tandem3T_J3TAabs*.txt...")
+    test_J3Tabs(dev3T, iv3t)
+    dev3T = Tandem3T()
+    iv3t = IV3T()
+    print("Generating Tandem3T_I3Trel*.txt...")
+    test_I3Trel(dev3T, iv3t)
+    dev3T = Tandem3T()
+    print("Generating Tandem3T_VM*.txt...")
+    test_VM(dev3T)
+    dev3T = Tandem3T()
+    print("Generating Tandem3T_VI0*.txt...")
+    test_VI0(dev3T)
+    dev3T = Tandem3T()
+    print("Generating Tandem3T_VIpoint*.txt...")
+    test_VIpoints(dev3T)
+    dev3T = Tandem3T()
+    print("Generating Tandem3T_specialpoints.txt...")
+    test_specialpoints(dev3T)
 
-    # test a few randomly
-    combs = list(itertools.product(range(len(current_keys)), range(len(current_keys)), range(len(voltage_keys))))
-    combs = [combo for combo in combs if combo[0] != combo[1]]
-    combids = range(len(combs))
-    testids = []
-    testnames = []
-    for combid in combids:
-        combo = combs[combid]
-        iv3t = dev3T.VIpoint(current_keys[combo[0]], current_keys[combo[1]], voltage_keys[combo[2]])
-        iv3t_vals = np.concatenate([getattr(iv3t, k) for k in iv3t.arraykeys])
-        if all(~np.isnan(iv3t_vals)):
-            if iv3t.name not in testnames:
-                testids.append(combid)
-                testnames.append(iv3t.name)
+    REGENERATE_TEST_FILES = False
+    print("Done!")
 
-    print(testnames)
-    print(testids)
-    import random
 
-    random_ids = random.sample(testids, 5)
-    print(random_ids)
-    print(testnames)
+if __name__ == "__main__":
+    generate_test_files()
+
+
+    # current_keys = [k for k in iv3t.arraykeys if k.startswith("I") and len(k) > 2]
+    # voltage_keys = [k for k in iv3t.arraykeys if k.startswith("V") and len(k) > 2]
+
+    # # test a few randomly
+    # combs = list(itertools.product(range(len(current_keys)), range(len(current_keys)), range(len(voltage_keys))))
+    # combs = [combo for combo in combs if combo[0] != combo[1]]
+    # combids = range(len(combs))
+    # testids = []
+    # testnames = []
+    # for combid in combids:
+    #     combo = combs[combid]
+    #     iv3t = dev3T.VIpoint(current_keys[combo[0]], current_keys[combo[1]], voltage_keys[combo[2]])
+    #     iv3t_vals = np.concatenate([getattr(iv3t, k) for k in iv3t.arraykeys])
+    #     if all(~np.isnan(iv3t_vals)):
+    #         if iv3t.name not in testnames:
+    #             testids.append(combid)
+    #             testnames.append(iv3t.name)
+
+    # print(testnames)
+    # print(testids)
+    # import random
+
+    # random_ids = random.sample(testids, 5)
+    # print(random_ids)
+    # print(testnames)
