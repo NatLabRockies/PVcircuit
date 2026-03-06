@@ -7,7 +7,7 @@ import copy
 import multiprocessing as mp
 import warnings
 from functools import lru_cache
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, cast
 
 import numpy as np  # arrays
 import pandas as pd
@@ -82,7 +82,7 @@ def VMlist(mmax: int) -> List[str]:
     return sVM
 
 
-def sandia_T(poa_global: float, wind_speed: float, temp_air: float) -> float:
+def sandia_T(poa_global: Union[float, np.ndarray, pd.Series], wind_speed: Union[float, np.ndarray, pd.Series], temp_air: Union[float, np.ndarray, pd.Series]) -> Union[float, np.ndarray, pd.Series]:
     """
     Calculate the solar cell temperature using the Sandia model.
 
@@ -110,17 +110,21 @@ def sandia_T(poa_global: float, wind_speed: float, temp_air: float) -> float:
     return temp_cell
 
 
-def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, TempCell: pd.Series, devlist: List[Union["pvc.Multi2T", "pvc.Tandem3T"]], oper: str) -> np.ndarray:
-    Pmax_out = np.zeros(len(Jscs))
+def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, TempCell: pd.Series, devlist: List[Union["pvc.Multi2T", "pvc.Tandem3T"]], oper: str) -> pd.DataFrame:
+
+    columns: list[str] = ["Voc", "Isc", "Vmp", "Imp", "Pmp"]
+    IV_params = pd.DataFrame(np.zeros((len(Jscs), len(columns))), columns=columns)
 
     for i in range(len(Jscs)):
         model = devlist[i]
         if isinstance(model, pvc.Multi2T):  # Multi2T or current matched 2-junction tandem
             for ijunc in range(model.njuncs):
-                model.j[ijunc].set(Eg=Egs[ijunc], Jext=Jscs[i, ijunc] / 1e3, TC=TempCell[i])
+                model.j[ijunc].set(Eg=Egs[i, ijunc], Jext=Jscs[i, ijunc] / 1e3, TC=TempCell.iloc[i])
 
             mpp_dict = model.MPP()
-            Pmax = mpp_dict["Pmp"]
+            # Pmax = mpp_dict["Pmp"]
+            for col in columns:
+                IV_params.loc[i, col] = mpp_dict[col]
 
         elif isinstance(model, pvc.Tandem3T):  # Tandem3T
             tandem_type = oper.split("-")
@@ -142,13 +146,22 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
             else:
                 iv3T = pvc.iv3T.IV3T("bogus", shape=1)
                 iv3T.Ptot[0] = 0
-            Pmax = iv3T.Ptot[0]
+            assert isinstance(iv3T, pvc.iv3T.IV3T)
+            IV_params.loc[i, "Vmp"] = iv3T.VA - iv3T.VB
+            IV_params.loc[i, "Imp"] = min(abs(iv3T.IA), abs(iv3T.IB))
+            IV_params.loc[i, "Pmp"] = iv3T.Ptot
+
+            iv3T = model.Voc3()
+            IV_params.loc[i, "Voc"] = iv3T.VA - iv3T.VB
+
+            iv3T = model.Isc3()
+            IV_params.loc[i, "Isc"] = min(abs(iv3T.IA), abs(iv3T.IB))
+
         else:
-            Pmax = 0.0
+            for col in columns:
+                IV_params.loc[i, col] = 0
 
-        Pmax_out[i] = Pmax
-
-    return Pmax_out  # Pmax in [W]
+    return IV_params  # Pmax in [W]
 
 
 class Meteo:
@@ -177,7 +190,10 @@ class Meteo:
 
         # Calculate irradiance from spectral proxy data
         self.irradiance = pd.Series(trapezoid(y=self.spectra, x=self.wavelength), index=self.datetime)  # Optical power of each spectrum
-        self.cell_temp = sandia_T(self.irradiance, self.wind, self.temp)  # Cell temperature calculation
+        self.cell_temp: pd.Series = pd.Series(
+            sandia_T(self.irradiance.to_numpy(), self.wind.to_numpy(), self.temp.to_numpy()),
+            index=self.datetime,
+        )  # Cell temperature calculation
         self.energy_in = trapezoid(y=self.irradiance, x=self.datetime.astype(np.int64)) / 1e9 / 3600 / 1000  # Energy input [kWh/m²/yr]
 
         self.average_photon_energy = None  # Will be calculated when running calc_ape
@@ -254,9 +270,13 @@ class Meteo:
         if self.sigmas is None:
             self.sigmas = np.zeros_like(self.bandgaps)
 
+        assert self.jscs is not None
+        assert self.bandgaps is not None
+        assert self.sigmas is not None
+
         # Ensure all data arrays have consistent shapes
         for attr in [self.jscs, self.bandgaps, self.sigmas]:
-            if attr is not None and attr.shape[0] != self.cell_temp.shape[0]:
+            if attr.shape[0] != self.cell_temp.shape[0]:
                 raise ValueError(f"Inconsistent array size: {attr.shape[0]} rows, expected {self.cell_temp.shape[0]}")
 
         # Determine chunk sizes for multiprocessing
@@ -282,27 +302,35 @@ class Meteo:
 
                 with mp.Pool(cpu_count) as pool:
                     # Assign tasks to multiprocessing pool
+                    # For multiprocessing
                     jobs = [
                         pool.apply_async(_calc_yield_async, args=(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], dev_list[chunk], oper), callback=update_tqdm)
                         for chunk in chunks
                     ]
-                    # Collect results from workers
-                    results = [item for job in jobs for item in job.get()]
+                    # Collect and combine dataframe results
+                    results = pd.concat([cast(pd.DataFrame, job.get()) for job in jobs], ignore_index=True)
 
             else:
                 pbar.set_description(f"Running {model.name} in mode {oper} without multiprocessing")
 
-                results = []
+                # For sequential processing, collect dataframes in a list then combine
+                result_dfs = []
                 for i, chunk in enumerate(chunks):
                     # Process each chunk sequentially
                     chunk_result = _calc_yield_async(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], dev_list[chunk], oper)
-                    results.extend(chunk_result)
+                    result_dfs.append(chunk_result)
                     pbar.update(len(chunk))
                     pbar.refresh()
 
-        self.outPowerMP = results  # output power [W]
+                # Combine all dataframes
+                results = pd.concat(result_dfs, ignore_index=True)
 
-        power_density = self.outPowerMP / model.totalarea  # W --> W/cm²
+        self.results = results
+        self.results.index = self.datetime
+
+        power = results["Pmp"]  # output power [W]
+
+        power_density = power / model.totalarea  # W --> W/cm²
 
         EnergyOut = trapezoid(power_density, self.datetime.values.astype(np.int64)) / 1e9  # [Ws/cm²/yr]
 
@@ -339,6 +367,7 @@ class Meteo:
             self.calc_ape()
 
         self_copy = copy.deepcopy(self)
+        assert self_copy.average_photon_energy is not None
         # Create a mask based on APE criteria
         ape_mask = (self_copy.average_photon_energy > min_ape) & (self_copy.average_photon_energy < max_ape)
 
@@ -369,13 +398,14 @@ class Meteo:
         spectra_mask = (self_copy.spectra >= min_spectra).all(axis=1) & (self_copy.spectra < max_spectra).all(axis=1)
         # Apply the mask to relevant attributes
         self_copy.datetime = self_copy.datetime[spectra_mask]
-        self_copy.average_photon_energy = self_copy.average_photon_energy[spectra_mask]
+        if self_copy.average_photon_energy is not None:
+            self_copy.average_photon_energy = self_copy.average_photon_energy[spectra_mask]
         self_copy.spectra = self_copy.spectra[spectra_mask]
         self_copy.irradiance = self_copy.irradiance[spectra_mask]
         self_copy.cell_temp = self_copy.cell_temp[spectra_mask]
 
         # Ensure all filtered attributes have the same length
-        assert len(self.spectra) == len(self.irradiance) == len(self.cell_temp) == len(self.average_photon_energy)
+        assert len(self_copy.spectra) == len(self_copy.irradiance) == len(self_copy.cell_temp)
         return self_copy
 
     def filter_custom(self, filter_array: np.ndarray) -> "Meteo":
