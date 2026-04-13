@@ -1,3 +1,12 @@
+# Claude Code / Copilot / AI-generated tooling files
+.claude/
+.claudeignore
+CLAUDE.md
+.github/copilot-instructions.md
+.github/prompts/
+docs/superpowers/
+holovsky_LC_instructions.md
+
 # Bash scripts
 *.sh
 
