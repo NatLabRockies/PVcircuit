@@ -122,6 +122,20 @@ class Multi2T(object):
             dev2T.j[0] = junc  # dynamically connected
 
         return dev2T
+    
+    def append_junction(self, junc: Junction, copy_attributes: bool = True) -> None:
+        """
+        append a junction to the Multi2T
+        """
+
+        self.njuncs += 1
+        self.Vmid = np.append(self.Vmid, np.nan)  # add new subcell voltage
+        self.set(Rs2T=(self.Rs2T / self.totalarea + junc.Rser / junc.totalarea) * np.min([self.totalarea, junc.totalarea]))  # update Rs2T
+        
+        if copy_attributes:
+            self.j.append(junc.copy())  # disconnected
+        else:
+            self.j.append(junc)  # dynamically connected
 
     def __str__(self):
         """
