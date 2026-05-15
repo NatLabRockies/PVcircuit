@@ -34,150 +34,188 @@ def test_basic_functions():
 
 # %%
 @pytest.fixture
-def junction():
+def junction_2d():
     return pvc.junction.Junction()
 
 
-def test_junction_str(junction):
+# %%
+@pytest.fixture
+def junction_1d():
+    junc = pvc.junction.Junction(
+        name="Junction 1Diode",
+        Eg=1.25,
+        sigma=2e-4,
+        TC=25,
+        Gsh=2e-5,
+        Rser=2.33e-3,
+        area=1.0,
+        n=[1.32],  # pvc needs n as list
+        # J0ref=[2.3e-14],  # A/cm^2 pvc needs J0ref as list
+        Jext=0.04,  # A/cm^2
+        beta=0.0,
+    )
+    return junc
+
+
+def test_junction_str(junction_2d):
 
     test_file = "Junction.txt"
     if REGENERATE_TEST_FILES:
         with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "w", encoding="utf8") as fout:
-            fout.write(junction.__str__())
+            fout.write(junction_2d.__str__())
 
-    with open(pvc.pvcpath.parent.joinpath("tests","test_files", test_file), "r", encoding="utf8") as fin:
+    with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
         test_str = fin.read()
 
-    np.testing.assert_string_equal(test_str, junction.__str__())
+    np.testing.assert_string_equal(test_str, junction_2d.__str__())
 
-def test_junction_setter(junction):
+
+def test_junction_setter(junction_2d):
     """
     Test the junction setters.
     """
 
     # test setting of n
-    junction.set(n=[1, 2])
-    np.testing.assert_array_equal(junction.n, np.array([1, 2]))
+    junction_2d.set(n=[1, 2])
+    np.testing.assert_array_equal(junction_2d.n, np.array([1, 2]))
 
     # test setting of single n value
-    junction.set(**{"n[0]": 3})
-    np.testing.assert_array_equal(junction.n, np.array([3, 2]))
+    junction_2d.set(**{"n[0]": 3})
+    np.testing.assert_array_equal(junction_2d.n, np.array([3, 2]))
 
     # test mismatch when setting single n value
     with pytest.raises(IndexError, match=r"invalid junction index. Set index is 3 but junction size is 2"):
-        junction.set(**{"n[2]": 4})
+        junction_2d.set(**{"n[2]": 4})
 
     # test mismatch when setting n and J0ratio of different size
     with pytest.raises(ValueError, match=r"n and J0ratio must be same size"):
-        junction.set(n=[1, 2, 3], J0ratio=[1, 2])
+        junction_2d.set(n=[1, 2, 3], J0ratio=[1, 2])
 
     with pytest.raises(ValueError, match=r"n and J0ratio must be same size"):
-        junction.set(n=[1, 2], J0ratio=[1, 2, 3])
+        junction_2d.set(n=[1, 2], J0ratio=[1, 2, 3])
 
     # test mismatch when setting n or J0ratio with different number of current diode number
     with pytest.raises(ValueError, match=r"setting single n or J0ratio value must match previous number of diodes"):
-        junction.set(n=[1, 2, 3])
+        junction_2d.set(n=[1, 2, 3])
 
     with pytest.raises(ValueError, match=r"setting single n or J0ratio value must match previous number of diodes"):
-        junction.set(J0ratio=[1, 2, 3])
-
+        junction_2d.set(J0ratio=[1, 2, 3])
 
     # test setting the general area with light and total area
-    junction.set(area=1.23)
-    np.testing.assert_almost_equal(junction.lightarea, 1.23)
-    np.testing.assert_almost_equal(junction.totalarea, 1.23)
+    junction_2d.set(area=1.23)
+    np.testing.assert_almost_equal(junction_2d.lightarea, 1.23)
+    np.testing.assert_almost_equal(junction_2d.totalarea, 1.23)
 
     # test setting invalid class values
     with pytest.raises(ValueError, match=r"invalid class attribute test"):
-        junction.set(test=-1)
+        junction_2d.set(test=-1)
     with pytest.raises(ValueError, match=r"invalid class attribute avalanche"):
-        junction.set(avalanche=1)
+        junction_2d.set(avalanche=1)
     with pytest.raises(ValueError, match=r"invalid class attribute mrb"):
-        junction.set(mrb=1)
+        junction_2d.set(mrb=1)
 
     # test reverse bias breakdown model keys
-    junction.set(RBB="bishop")
-    junction.set(avalanche=1)
+    junction_2d.set(RBB="bishop")
+    junction_2d.set(avalanche=1)
 
     with pytest.raises(ValueError, match=r"invalid class attribute J0rb"):
-        junction.set(J0rb=1)
+        junction_2d.set(J0rb=1)
 
-    junction.set(RBB="JFG")
-    junction.set(J0rb=1)
+    junction_2d.set(RBB="JFG")
+    junction_2d.set(J0rb=1)
 
 
-def test_junction_properties(junction):
+def test_junction_properties(junction_2d):
     """
     Test the junction properties.
     """
 
-    np.testing.assert_almost_equal(junction.Jphoto, 0.04)
-    np.testing.assert_allclose(junction.J0, [1.3141250302231388e-15, 3.6250862475576206e-09])
+    np.testing.assert_almost_equal(junction_2d.Jphoto, 0.04)
+    np.testing.assert_allclose(junction_2d.J0, [1.3141250302231388e-15, 3.6250862475576206e-09])
 
 
-def test_junction_j0init(junction):
+def test_junction_j0init(junction_2d):
 
     with pytest.raises(ValueError, match=r"J0ref and n must be same size"):
-        junction._J0init(1e-15)
+        junction_2d._J0init(1e-15)
 
-    junction._J0init([1e-15, 1e-9])
+    junction_2d._J0init([1e-15, 1e-9])
 
-    np.testing.assert_allclose(junction.J0, [1e-15, 1e-9])
-    np.testing.assert_allclose(junction.J0ratio, [7.609626, 2.75855506])
-
-
-def test_jem(junction):
-
-    np.testing.assert_almost_equal(junction.Jem(0.6), 1.8227873411146403e-06)
-    np.testing.assert_almost_equal(junction.Jem(-0.6), 0.0)
+    np.testing.assert_allclose(junction_2d.J0, [1e-15, 1e-9])
+    np.testing.assert_allclose(junction_2d.J0ratio, [7.609626, 2.75855506])
 
 
-def test_notdiode(junction):
+def test_jem(junction_2d):
 
-    assert not junction.notdiode()
-    junction.set(J0ratio=[0, 0])
-    assert junction.notdiode()
-
-
-def test_Jmultidiodes(junction):
-
-    np.testing.assert_almost_equal(junction.Jmultidiodes(0.56), 0.00019985765193700707)
+    np.testing.assert_almost_equal(junction_2d.Jem(0.6), 1.8227873411146403e-06)
+    np.testing.assert_almost_equal(junction_2d.Jem(-0.6), 0.0)
 
 
-def test_JshuntRBB(junction):
+def test_notdiode(junction_2d):
 
-    junction.set(RBB=None, Gsh=1e-4)
-    np.testing.assert_almost_equal(junction.JshuntRBB(2), 0.0002)
-    junction.set(RBB="JFG")
-    np.testing.assert_almost_equal(junction.JshuntRBB(-3), -3.033350517003164)
-    junction.set(RBB="bishop")
-    np.testing.assert_almost_equal(junction.JshuntRBB(-18), -0.0018153659543416658)
+    assert not junction_2d.notdiode()
+    junction_2d.set(J0ratio=[0, 0])
+    assert junction_2d.notdiode()
 
 
-def test_Vdiode(junction):
+def test_Jmultidiodes(junction_2d):
 
-    np.testing.assert_almost_equal(junction.Vdiode(0), 0.7849550554937345)
-    np.testing.assert_almost_equal(junction.Vdiode(-40e-3), 0, decimal=5)
-    np.testing.assert_equal(junction.Vdiode(-41e-3), np.nan) #VLIM_REVERSE
-
-    junction.set(RBB="bishop", Gsh=1e-4)
-    np.testing.assert_almost_equal(junction.Vdiode(-41e-3), -9.652384228088378)
-    junction.set(RBB="JFG")
-    np.testing.assert_almost_equal(junction.Vdiode(-41e-3), -0.9224606102628319)
-
-    junction.set(J0ratio=[0, 0])
-    np.testing.assert_almost_equal(junction.Vdiode(-41e-3), 0)
+    np.testing.assert_almost_equal(junction_2d.Jmultidiodes(0.56), 0.00019985765193700707)
 
 
-def test_Vmid(junction):
+def test_JshuntRBB(junction_2d):
 
-    np.testing.assert_almost_equal(junction.Vmid(0), 0)
-    np.testing.assert_almost_equal(junction.Vmid(0.5), 0.5)
+    junction_2d.set(RBB=None, Gsh=1e-4)
+    np.testing.assert_almost_equal(junction_2d.JshuntRBB(2), 0.0002)
+    junction_2d.set(RBB="JFG")
+    np.testing.assert_almost_equal(junction_2d.JshuntRBB(-3), -3.033350517003164)
+    junction_2d.set(RBB="bishop")
+    np.testing.assert_almost_equal(junction_2d.JshuntRBB(-18), -0.0018153659543416658)
 
-    junction.set(Rser=0.73)
-    np.testing.assert_almost_equal(junction.Vmid(0), 0.029200002624152344)
-    np.testing.assert_almost_equal(junction.Vmid(0.5), 0.5291205858003947)
 
+def test_Vdiode(junction_2d):
+
+    np.testing.assert_almost_equal(junction_2d.Vdiode(0), 0.7849550554937345)
+    np.testing.assert_almost_equal(junction_2d.Vdiode(-40e-3), 0, decimal=5)
+    np.testing.assert_equal(junction_2d.Vdiode(-41e-3), np.nan)  # VLIM_REVERSE
+
+    junction_2d.set(RBB="bishop", Gsh=1e-4)
+    np.testing.assert_almost_equal(junction_2d.Vdiode(-41e-3), -9.652384228088378)
+    junction_2d.set(RBB="JFG")
+    np.testing.assert_almost_equal(junction_2d.Vdiode(-41e-3), -0.9224606102628319)
+
+    junction_2d.set(J0ratio=[0, 0])
+    np.testing.assert_almost_equal(junction_2d.Vdiode(-41e-3), 0)
+
+
+def test_Vmid(junction_2d):
+
+    np.testing.assert_almost_equal(junction_2d.Vmid(0), 0)
+    np.testing.assert_almost_equal(junction_2d.Vmid(0.5), 0.5)
+
+    junction_2d.set(Rser=0.73)
+    np.testing.assert_almost_equal(junction_2d.Vmid(0), 0.029200002624152344)
+    np.testing.assert_almost_equal(junction_2d.Vmid(0.5), 0.5291205858003947)
+
+
+def test_JV(junction_1d):
+    # Compare measurement, pvlib single-diode fit, and pvcircuit Junction forward model.
+    # pvlib single-diode forward model — feed Rs in V/(mA/cm²) to match the
+    # mA/cm² current space that i_from_v expects (undo the Ω·cm² conversion).
+    # photocurrent, saturation_current, Rs_fit_ohm, Rsh_fit_ohm, nNsVth = jv_fits[name]
+    # J_pvlib = ivtools.i_from_v(V_meas, photocurrent, saturation_current, Rs_fit_ohm, Rsh_fit_ohm, nNsVth)
+
+    # pvcircuit Junction model for subcells
+    voc = junction_1d.Vdiode(0)
+    V_sweep = np.linspace(0, voc, 200)
+    V_mid = np.vectorize(junction_1d.Vmid)(V_sweep)
+    J_pvc_sweep = np.vectorize(junction_1d.Jparallel)(V_mid, junction_1d.Jphoto) * 1  # A/cm²
+    J_pvlib = pvsystem.i_from_v(V_sweep, junction_1d.Jphoto, junction_1d.J0, junction_1d.Rser, 1/junction_1d.Gsh, junction_1d.n[0] * pvc.junction.Vth(junction_1d.TC))
+    np.testing.assert_allclose(J_pvc_sweep, J_pvlib, rtol=1e-3, atol=1e-6)
+    # fig,ax = plt.subplots()
+    # ax.plot(V_sweep, J_pvc_sweep, label="pvcircuit Junction")
+    # ax.plot(V_sweep, J_pvlib, label="pvlib single-diode fit")
+    # plt.show()
 
 
 def generate_test_files():
@@ -194,8 +232,7 @@ def generate_test_files():
 
 
 if __name__ == "__main__":
-
-    pytest.main(['-v', __file__])
+    pytest.main(["-v", __file__])
 
     generate_test_files()
 
