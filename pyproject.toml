@@ -73,15 +73,15 @@ keywords = ["PV modeling", "Tandem solar cells"]
 # authored the project, and a valid email address corresponding to the name
 # listed.
 authors = [
-    {name = "John Geisz", email = "john.geiz@nrel.gov" }
+    {name = "John Geisz", email = "john.geiz@nlr.gov" }
 ]
 
 # This should be your name or the names of the organization who currently
 # maintains the project, and a valid email address corresponding to the name
 # listed.
 maintainers = [
-    {name = "John Geisz", email = "john.geiz@nrel.gov" },
-    {name = "Robert Witteck", email = "robert.witteck@nrel.gov" }
+    {name = "John Geisz", email = "john.geiz@nlr.gov" },
+    {name = "Robert Witteck", email = "robert.witteck@nlr.gov" }
 ]
 
 # Classifiers help users find your project by categorizing it.
@@ -169,8 +169,8 @@ test = [
 # maintainers, and where to support the project financially. The key is
 # what's used to render the link text on PyPI.
 [project.urls]
-"Homepage" = "https://github.com/NREL/PVcircuit"
-"Bug Reports" = "https://github.com/NREL/PVcircuit/issues"
+"Homepage" = "https://github.com/NatLabRockies/PVcircuit"
+"Bug Reports" = "https://github.com/NatLabRockies/PVcircuit/issues"
 
 # This is configuration specific to the `setuptools` build backend.
 # If you are using a different build backend, you will need to change this.

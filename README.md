@@ -1,4 +1,4 @@
-[![Python Tests](https://github.com/NREL/PVcircuit/actions/workflows/tomlproject.yml/badge.svg?branch=master)](https://github.com/NREL/PVcircuit/actions/workflows/tomlproject.yml)
+[![Python Tests](https://github.com/NatLabRockies/PVcircuit/actions/workflows/tomlproject.yml/badge.svg?branch=master)](https://github.com/NatLabRockies/PVcircuit/actions/workflows/tomlproject.yml)
 [![License](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
 # pvcircuit
@@ -20,7 +20,7 @@ Energy yield:
 
 ### Installation
 - install GitHub Desktop
-- on this https://github.com/NREL/PVcircuit page click the green "Code" button and "Open with GitHub Desktop"
+- on this https://github.com/NatLabRockies/PVcircuit page click the green "Code" button and "Open with GitHub Desktop"
 - cd to the PVcircuit directory in terminal and type "pip install -e ."
 
 ### Packages needed
@@ -44,7 +44,7 @@ Energy yield:
 # Junction( ) Class
 A single *Junction* that can be combined together to form tandem and multijunction solar cells.
 
-![Junction Schematic](https://github.com/NREL/PVcircuit/blob/master/images/junction%20equations.png)
+![Junction Schematic](https://github.com/NatLabRockies/PVcircuit/blob/master/images/junction%20equations.png)
 
 The *Junction* is modeled by an arbitrary number of parallel diodes such as n=1, n=2, n=2/3, or any other ideality factor.
 The temperature dependance of each diode saturation current J0n is determined relative to the Jdb(Eg,T).
@@ -177,7 +177,7 @@ Find intermediate voltage in a single junction diode with series resistance give
 ## Multi2T( ) Class
 Two terminal multijunction device composed of any number of series connected *Junctions*. The sum of all Rser is an attribute of the *Multi2T* object and the Rser attributes of each sub *Junction* are ignored
 
-![2T Multijunction Schematic](https://github.com/NREL/PVcircuit/blob/master/images/MultijunctionSchematic.png)
+![2T Multijunction Schematic](https://github.com/NatLabRockies/PVcircuit/blob/master/images/MultijunctionSchematic.png)
 
 ## Multi2T.attributes
 ### Multi2T.name
@@ -281,7 +281,7 @@ Create a light or dark plot modeled from Multi2T parameters. Outputs: *(mpl.Figu
 Three terminal (3T) tandem composed of two *Junctions*.
 Four terminal (4T) tandems can be modeled as 3T tandems with no resistive coupling (Rz=0) but still require luminescent coupling. The 4T shunt (or breakdown) between the subcells is not treated but could become important for large voltage differences.
 
-![3T and 4T Tandem Schematic](https://github.com/NREL/PVcircuit/blob/master/images/TandemsSchematic.png)
+![3T and 4T Tandem Schematic](https://github.com/NatLabRockies/PVcircuit/blob/master/images/TandemsSchematic.png)
 
 ## Tandem3T.attributes
 ### Tandem3T.name
@@ -399,7 +399,7 @@ Calculate and plot Tandem3T device
 ## IV3T( ) Class
 Structure to contain all the information about the operational state of a 3T tandem.
 
-![3T Measurement Equipment](https://github.com/NREL/PVcircuit/blob/master/images/3Tmeasurementequipment.png)
+![3T Measurement Equipment](https://github.com/NatLabRockies/PVcircuit/blob/master/images/3Tmeasurementequipment.png)
 
 Device parameters calculated for a 'Tandem3T' object.
 
