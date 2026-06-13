@@ -49,7 +49,7 @@ class Tandem3T(object):
 
         # set attributes
         self.name = name
-        self.Rz = Rz
+        self.Rz = Rz  #: [\Omega*cm^2] inter-contact (z-direction) series resistance, area-normalised
         self.top = Junction(name="top", Eg=Eg_list[0], TC=TC, Jext=Jext, pn=pn[0], beta=0.0)
         self.bot = Junction(name="bot", Eg=Eg_list[1], TC=TC, Jext=Jext, pn=pn[1])
 
@@ -57,10 +57,10 @@ class Tandem3T(object):
         """
         Create an independent copy of this Tandem3T.
 
-        ``copy.deepcopy`` crashes on this class (legacy comment retained
+        'copy.deepcopy' crashes on this class (legacy comment retained
         from the original implementation), so we build the copy manually:
-        the wrapper is shallow-copied and the ``top`` and ``bot`` junctions
-        are duplicated via ``Junction.copy()`` so the returned device is
+        the wrapper is shallow-copied and the 'top' and 'bot' junctions
+        are duplicated via 'Junction.copy()' so the returned device is
         fully independent.
         """
         tmp = copy.copy(self)
@@ -196,6 +196,9 @@ class Tandem3T(object):
                 continue
 
             # input current densities
+            # Jt, Jr, Jz are current densities [A/cm^2] obtained from the
+            # absolute device currents Iro, Izo, Ito [A] divided by the
+            # corresponding junction or device totalarea [cm^2].
             Jt = Ito / top.totalarea
             Jr = Iro / bot.totalarea
             Jz = Izo / self.totalarea
@@ -229,6 +232,8 @@ class Tandem3T(object):
                 Vr = Vrmid + Jr * bot.Rser
 
             # extra Z contact
+            # Vz [V] = Jz [A/cm^2] * Rz [\Omega*cm^2]. The matching units make Rz an
+            # area-normalised resistance, mirroring Junction.Rser.
             Vz = Jz * self.Rz
 
             # items in array = difference of local variable
@@ -370,7 +375,7 @@ class Tandem3T(object):
 
         operates on relative voltages, taking the input voltages Vzt and Vrz, and calculates currents while ignoring Vtr.
         Iteratively adjusts these voltages using resistance models to calculate the current densities. Uses iterative method to find the
-        correct value of Vz that satisfies Kirchhoff’s current law across the junctions, adjusting the voltage drop for the z-terminal and checking if the current balances (via _dI function).
+        correct value of Vz that satisfies Kirchhoff's current law across the junctions, adjusting the voltage drop for the z-terminal and checking if the current balances (via _dI function).
         """
 
         top = self.top  # top Junction
@@ -745,7 +750,6 @@ class Tandem3T(object):
         solve for mixed (V=0, I=0) zero power points
         separate diodes for quick single point solution
         """
-        ts = time()
         pt = IV3T(name=VIname, meastype=meastype, shape=1, area=self.lightarea)
         top = self.top  # pointer
         bot = self.bot  # pointer
@@ -801,7 +805,6 @@ class Tandem3T(object):
         else:
             pt.nanpnt(0)
 
-        te = time()
         # dt = te - ts
         # print('VI0: ' + pt.name + ' {0:2.4f} s'.format(dt))
 

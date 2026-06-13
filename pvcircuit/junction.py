@@ -91,7 +91,11 @@ class Junction(object):
 
     ATTR = ["Eg", "TC", "Gsh", "Rser", "area", "lightarea", "totalarea", "Jext", "JLC", "beta", "gamma", "pn", "Jphoto", "TK", "Jdb", "RBB"]
     ARY_ATTR = ["n", "J0ratio", "J0"]
-    J0scale = 1000.0  # mA same as Igor, changes J0ratio because of units
+    # Internal numerical-stability factor (mA/cm^2). With ``Jdb ~ 1e-26`` and
+    # ``J0 ~ 1e-21`` the ratio ``J0/Jdb^(1/n)`` would otherwise span ~20 orders
+    # of magnitude. Scaling by 1000 keeps ``J0ratio`` close to O(1) so fits and
+    # serialisation stay numerically well-behaved. Do not change.
+    J0scale = 1000.0
 
     def __init__(
         self,
@@ -121,18 +125,18 @@ class Junction(object):
         # user inputs
         self.name = name  # remember my name
         self.Eg = np.float64(Eg)  #: [eV] junction band gap
-        self.sigma = np.float64(sigma)  #: [eV] junction band gap sigma
-        self.TC = np.float64(TC)  #: [C] junction temperature
-        self.Jext = np.float64(Jext)  #: [A/cm2] photocurrent density
-        self.Gsh = np.float64(Gsh)  #: [ohm] shunt conductance=1/Rsh
-        self.Rser = np.float64(Rser)  #: [ohm] series resistance
-        self.lightarea = np.float64(area)  # [cm2] illuminated junction area
-        self.totalarea = np.float64(area)  # [cm2] total junction area including shaded areas
+        self.sigma = np.float64(sigma)  #: [eV] junction band gap sigma (Urbach tail width)
+        self.TC = np.float64(TC)  #: [\degC] junction temperature (use the ``TK`` property for Kelvin)
+        self.Jext = np.float64(Jext)  #: [A/cm^2] external photocurrent density (printed as mA/cm^2)
+        self.Gsh = np.float64(Gsh)  #: [S/cm^2] shunt conductance (= 1/Rsh, area-normalised)
+        self.Rser = np.float64(Rser)  #: [\Omega*cm^2] series resistance (area-normalised, so ``Vdrop = Rser * J``)
+        self.lightarea = np.float64(area)  #: [cm^2] illuminated junction area
+        self.totalarea = np.float64(area)  #: [cm^2] total junction area including shaded regions
         # used for tandems only
-        self.pn = int(pn)  # p-on-n=1 or n-on-p=-1
-        self.beta = np.float64(beta)  # LC parameter
-        self.gamma = np.float64(gamma)  # PL parameter from Lan
-        self.JLC = np.float64(JLC)  # LC current from other cell JLC=beta(this)*Jem(other)
+        self.pn = int(pn)  #: polarity flag: +1 for p-on-n, -1 for n-on-p (sign convention)
+        self.beta = np.float64(beta)  #: [unitless] luminescent coupling efficiency (top -> bottom radiative coupling)
+        self.gamma = np.float64(gamma)  #: [unitless] photoluminescent coupling coefficient (Lan et al. PL parameter)
+        self.JLC = np.float64(JLC)  #: [A/cm^2] luminescent coupling current density injected from the previous junction (``beta * Jem`` of the neighbour)
 
         # multiple diodes
         # n=1 bulk, n=m SNS, and n=2/3 Auger mechanisms
@@ -330,30 +334,54 @@ class Junction(object):
 
     @property
     def Jphoto(self) -> float:
-        return self.Jext * self.lightarea / self.totalarea + self.JLC
+        """[A/cm^2] total photocurrent density on the junction.
 
-    # total photocurrent
-    # external illumination is distributed over total area
+        Combines the external photocurrent (scaled by the illuminated
+        fraction of the total area) and the luminescent-coupling current
+        injected from a neighbouring junction:
+
+            'Jphoto = Jext * (lightarea / totalarea) + JLC'.
+
+        The area scaling assumes 'Jext' is referenced to 'lightarea' and
+        spreads it uniformly across 'totalarea' so shaded regions
+        contribute zero photocurrent.
+        """
+        return self.Jext * self.lightarea / self.totalarea + self.JLC
 
     @property
     def TK(self) -> float:
-        # temperature in (K)
+        """[K] junction temperature in Kelvin (derived from :attr:'TC')."""
         return TK(self.TC)
 
     @property
     def Vth(self) -> float:
-        # Thermal voltage in volts = kT/q
+        """[V] thermal voltage kT/q at the current junction temperature."""
         return Vth(self.TC)
 
     @property
     def Jdb(self) -> float:
-        # detailed balance saturation current
+        """[A/cm^2] radiative (detailed-balance) saturation current density.
+
+        Computed from :attr:'Eg', :attr:'sigma', and :attr:'TC' via the Rau et
+        al. formulation. This is a thermodynamic quantity (not a free
+        parameter) and forms the irreducible lower bound on :attr:'J0'.
+        """
         return Jdb(self.TC, self.Eg, self.sigma)
 
     @property
     def J0(self) -> float:
-        # dynamically calculated J0(T)
-        # return np.ndarray [J0(n0), J0(n1), etc]
+        """[A/cm^2] per-diode saturation current densities '[J0(n0), J0(n1), ...]'.
+
+        Recomputed on every access from :attr:'Jdb', :attr:'n', and
+        :attr:'J0ratio' using the formula
+
+            'J0[i] = (Jdb * J0scale)^(1/n[i]) * J0ratio[i] / J0scale'
+
+        where 'J0scale = 1000' is an internal numerical-stability factor
+        (see the class-level comment on :attr:'J0scale'). Because
+        :attr:'Jdb' depends on temperature, :attr:'J0' automatically tracks
+        changes in :attr:'TC'.
+        """
 
         if (isinstance(self.n, np.ndarray)) and (isinstance(self.J0ratio, np.ndarray)):
             if self.n.size == self.J0ratio.size:

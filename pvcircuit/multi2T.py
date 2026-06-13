@@ -84,9 +84,9 @@ class Multi2T(object):
         """
         Create an independent copy of this Multi2T.
 
-        ``copy.deepcopy`` crashes on this class, so we build the copy manually:
+        'copy.deepcopy' crashes on this class, so we build the copy manually:
         the wrapper is shallow-copied, but the contained junction list and
-        each junction inside it are duplicated via ``Junction.copy()``.
+        each junction inside it are duplicated via 'Junction.copy()'.
         Mutating a junction on the returned object will therefore NOT
         affect the original device.
         """
@@ -106,6 +106,9 @@ class Multi2T(object):
         bot = dev3T.bot
 
         dev2T = cls(name=dev3T.name, TC=dev3T.TC, Eg_list=[top.Eg, bot.Eg])
+        # Rs2T [\Omega*cm^2] = area-weighted average of the two Rser values
+        # (each Rser is itself in \Omega*cm^2, so the formula has dimensions of
+        # \Omega*cm^2 * cm^2 / cm^2 -> \Omega*cm^2).
         dev2T.set(Rs2T=(top.Rser * top.totalarea + bot.Rser * bot.totalarea) / dev3T.totalarea)
 
         if copy_attributes:
@@ -143,6 +146,8 @@ class Multi2T(object):
 
         self.njuncs += 1
         self.Vmid = np.append(self.Vmid, np.nan)  # add new subcell voltage
+        # Keep Rs2T in \Omega*cm^2: parallel-combine the area-normalised resistances
+        # (Rs2T/totalarea, Rser/totalarea), then re-normalise by the smaller area.
         self.set(Rs2T=(self.Rs2T / self.totalarea + junc.Rser / junc.totalarea) * np.min([self.totalarea, junc.totalarea]))  # update Rs2T
         
         if copy_attributes:
@@ -245,16 +250,16 @@ class Multi2T(object):
             elif key not in list(self.__dict__.keys()):
                 raise ValueError(f"invalid class attribute {key}")
 
-    def V2T(self, I: float) -> float:
+    def V2T(self, I: float) -> float:  # noqa: E741
         """
         calcuate V(J) of 2T multijunction
         """
 
         # convert to prevent brent warnings
         if isinstance(I, np.ndarray) and I.size == 1:
-            I = I.item()
+            I = I.item()  # noqa: E741
         else:
-            I = np.float64(I)
+            I = np.float64(I)  # noqa: E741
 
         for i in range(self.njuncs):
             if i > 0:  # previous LC
@@ -267,6 +272,7 @@ class Multi2T(object):
 
             self.Vmid[i] = self.j[i].Vdiode(I / self.j[i].totalarea)
 
+        # Rs2T [\Omega*cm^2] * I [A] / totalarea [cm^2] = V (series-resistance drop).
         Vtot = np.sum(self.Vmid) + self.Rs2T * I / self.totalarea
 
         # TODO raise error
@@ -571,7 +577,7 @@ class Multi2T(object):
 
     #             if False:
     #                 Jext_list = self.proplist("Jext")  # remember list external photocurrents
-    #                 snote = "T = {0:.1f} C, Rs2T = {1:g} Ω cm2, A = {2:g} cm2".format(self.TC, self.Rs2T, self.lightarea)
+    #                 snote = "T = {0:.1f} C, Rs2T = {1:g} \Omega cm2, A = {2:g} cm2".format(self.TC, self.Rs2T, self.lightarea)
     #                 snote += "\nEg = " + str(Eg_list) + " eV"
     #                 snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm2"
     #                 snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(
@@ -875,7 +881,7 @@ class Multi2T(object):
 
     #         if False:
     #             # annotate
-    #             snote = "T = {0:.1f} C, Rs2T = {1:g} Ω cm2, A = {2:g} cm2".format(self.TC, self.Rs2T, self.lightarea)
+    #             snote = "T = {0:.1f} C, Rs2T = {1:g} \Omega cm2, A = {2:g} cm2".format(self.TC, self.Rs2T, self.lightarea)
     #             snote += "\nEg = " + str(Eg_list) + " eV"
     #             snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm2"
     #             snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(

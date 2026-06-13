@@ -29,12 +29,14 @@ datapath = pvcpath.joinpath(r"data")
 notebook_datapath = pvcpath.parent.joinpath(r"notebooks/notebook_data")
 
 
-import pvcircuit.EY as EY
-import pvcircuit.iv3T as iv3T
-import pvcircuit.junction as junction
-import pvcircuit.multi2T as multi2T
-import pvcircuit.qe as qe
-import pvcircuit.tandem3T as tandem3T
+# Submodule imports must follow the path constants above because each of these
+# modules touches ``pvc.pvcpath`` / ``pvc.datapath`` at import time.
+import pvcircuit.EY as EY  # noqa: E402
+import pvcircuit.iv3T as iv3T  # noqa: E402
+import pvcircuit.junction as junction  # noqa: E402
+import pvcircuit.multi2T as multi2T  # noqa: E402
+import pvcircuit.qe as qe  # noqa: E402
+import pvcircuit.tandem3T as tandem3T  # noqa: E402
 
 # expose constructors to package's top level
 Junction = junction.Junction

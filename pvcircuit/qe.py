@@ -45,11 +45,17 @@ junctioncolors = [
 
 # constants
 k_q = constants.k / constants.e
-hc_k = constants.h * constants.c / constants.k * 1e9  # for wavelength (nm)
-DB_PREFIX = 2.0 * np.pi * constants.e * (constants.k / constants.h) ** 3 / (constants.c) ** 2 / 1.0e4  # about 1.0133e-8 for Jdb[A/cm2]
-nm2eV = constants.h * constants.c / constants.e * 1e9
+hc_k = constants.h * constants.c / constants.k * 1e9  # [nm*K] used in radiative integrand exp(hc/\lambdakT) when \lambda is in nm
+DB_PREFIX = 2.0 * np.pi * constants.e * (constants.k / constants.h) ** 3 / (constants.c) ** 2 / 1.0e4  # [A/(cm^2*K^3)] \approx 1.0133e-8, used for Jdb [A/cm^2]
+nm2eV = constants.h * constants.c / constants.e * 1e9  # [eV*nm] \approx 1239.84, converts photon energy [eV] <-> wavelength [nm]
+# JCONST converts trapezoid(EQE*Pspec*\lambda, d\lambda) into a current density. Units cancel
+# as follows: integrand [W/m^2/nm * nm * nm -> W*nm/m^2] \times JCONST = mA/cm^2.
+#   1000  : A -> mA
+#   1/100 : 1/m -> 1/cm        (first /100)
+#   1/100 : 1/m -> 1/cm        (second /100)
+#   1/nm2eV: nm -> eV (so photon energy in eV cancels with EQE per-photon)
 JCONST = 1000 / 100 / 100 / nm2eV  # mA/cm2
-DBWVL_PREFIX = 2.0 * np.pi * constants.c * constants.e / 100 / 100  # A/cm2
+DBWVL_PREFIX = 2.0 * np.pi * constants.c * constants.e / 100 / 100  # [A/cm^2] wavelength-domain Jdb prefactor
 
 
 # standard spectra
@@ -179,6 +185,13 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
         use (start, step) for equally spaced data
         use None for same as xspec
     default x values for Pspec from wvl
+
+    .. note::
+        **Return unit**: when 'EQE' is supplied the result is the
+        short-circuit current density in **mA/cm^2** (via :data:'JCONST').
+        :class:'pvcircuit.junction.Junction' stores 'Jext' in **A/cm^2**,
+        so callers that feed this into the junction model must divide by
+        '1000' first (see :class:'pvcircuit.EY.Meteo' for an example).
     """
 
     # check spectra input
@@ -370,7 +383,7 @@ class EQE(object):
     It creates a class containing nth junctions EQEs and Luminescent Coupling
     between junctions. The contribution can be studied interectively using
     ipywidgets under a notebook.
-    NOTE: Wavelengths become an N×1 array, and EQE becomes an N×M array
+    NOTE: Wavelengths become an N\times1 array, and EQE becomes an N\timesM array
     (N is the number of wavelength points, and M is the number of junctions).
     Each row corresponds to a single wavelength entry; columns represent
     different junctions.
@@ -969,10 +982,10 @@ class EQET(EQE):
         return self.method_dict[method](temperature)
 
     def get_current_for_temperature(self, target_temperature: Union[float, np.ndarray], degrees: Union[int, List[int]] = 5) -> np.ndarray:
-        """
+        r"""
         Calculate the current density J(T) for each target temperature by first applying a polynomial fit
-        to EQE(T,λ) as a function of temperature at each wavelength λλ,
-        and then integrating over λ to obtain J(T)
+        to EQE(T,\lambda) as a function of temperature at each wavelength \lambda\lambda,
+        and then integrating over \lambda to obtain J(T)
 
         Args:
             target_temperature (Union[float,np.ndarray[float]]): target tempreature for J(T)
@@ -1344,12 +1357,12 @@ class TemperatureModel:
         self.Tref = Tref
 
     def apply(self, temperature: Union[float, np.ndarray], ref_value: float) -> Union[float, np.ndarray]:
-        """
+        r"""
         Applies the specified model to temperature and scales it with a reference value.
 
         Args:
             temperature (Union[float, pd.Series]): Target temperature.
-            ref_value (float): Reference value at a baseline temperature (e.g., 25°C).
+            ref_value (float): Reference value at a baseline temperature (e.g., 25\degC).
 
         Returns:
             Union[float, pd.Series]: Calculated value at target temperature.

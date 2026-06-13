@@ -2,15 +2,15 @@ import os
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-
-# Set to True once to write baseline test files, then revert to False
-REGENERATE_TEST_FILES = False
 import numpy as np
 import pandas as pd
 import pvcircuit as pvc
 import pytest
 from pvcircuit import Multi2T
 from pvlib import ivtools, pvsystem
+
+# Set to True once to write baseline test files, then revert to False
+REGENERATE_TEST_FILES = False
 
 
 # %%
@@ -200,8 +200,8 @@ def test_Vmid(junction_2d):
 
 def test_JV(junction_1d):
     # Compare measurement, pvlib single-diode fit, and pvcircuit Junction forward model.
-    # pvlib single-diode forward model — feed Rs in V/(mA/cm²) to match the
-    # mA/cm² current space that i_from_v expects (undo the Ω·cm² conversion).
+    # pvlib single-diode forward model -- feed Rs in V/(mA/cm^2) to match the
+    # mA/cm^2 current space that i_from_v expects (undo the \Omega*cm^2 conversion).
     # photocurrent, saturation_current, Rs_fit_ohm, Rsh_fit_ohm, nNsVth = jv_fits[name]
     # J_pvlib = ivtools.i_from_v(V_meas, photocurrent, saturation_current, Rs_fit_ohm, Rsh_fit_ohm, nNsVth)
 
@@ -209,7 +209,7 @@ def test_JV(junction_1d):
     voc = junction_1d.Vdiode(0)
     V_sweep = np.linspace(0, voc, 200)
     V_mid = np.vectorize(junction_1d.Vmid)(V_sweep)
-    J_pvc_sweep = np.vectorize(junction_1d.Jparallel)(V_mid, junction_1d.Jphoto) * 1  # A/cm²
+    J_pvc_sweep = np.vectorize(junction_1d.Jparallel)(V_mid, junction_1d.Jphoto) * 1  # A/cm^2
     J_pvlib = pvsystem.i_from_v(V_sweep, junction_1d.Jphoto, junction_1d.J0, junction_1d.Rser, 1/junction_1d.Gsh, junction_1d.n[0] * pvc.junction.Vth(junction_1d.TC))
     np.testing.assert_allclose(J_pvc_sweep, J_pvlib, rtol=1e-3, atol=1e-6)
     # fig,ax = plt.subplots()

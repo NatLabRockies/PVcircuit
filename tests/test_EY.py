@@ -113,9 +113,9 @@ def _load_nsrdb_raw():
     data.index = pd.DatetimeIndex(timestamp, name="timestamp")
 
     meteo_full = data.iloc[:, :32].copy()
-    spectra_full = data.iloc[:, 32:].copy() / 1e3  # W/m²/µm → W/m²/nm
+    spectra_full = data.iloc[:, 32:].copy() / 1e3  # W/m^2/\mum -> W/m^2/nm
     wavelength = (
-        spectra_full.columns.str.extract(r"(\d+\.\d+)", expand=True).astype(float).to_numpy().flatten() * 1e3  # µm → nm
+        spectra_full.columns.str.extract(r"(\d+\.\d+)", expand=True).astype(float).to_numpy().flatten() * 1e3  # \mum -> nm
     )
 
     spectra_full.fillna(0, inplace=True)
@@ -181,7 +181,7 @@ def test_add_bandgaps(tc_eqet, bc_eqet, meteo):
     ey.add_bandgaps(bc_model.apply(cell_temps, float(bc_bg25[0])))
 
     assert ey.bandgaps.shape == (n, 2)
-    # bandgaps should be physically reasonable (0.5–3 eV)
+    # bandgaps should be physically reasonable (0.5-3 eV)
     assert np.all(ey.bandgaps > 0.5)
     assert np.all(ey.bandgaps < 3.0)
 
@@ -198,7 +198,7 @@ def test_add_currents(tc_eqet, bc_eqet, meteo):
     n = len(ey.cell_temp)
     cell_temps = ey.cell_temp.to_numpy()  # shape (n,)
 
-    # add spectra — tile AM1.5G to (N_wvl, n) so spectra.shape[1] == n
+    # add spectra -- tile AM1.5G to (N_wvl, n) so spectra.shape[1] == n
     tc_eqet_copy = copy.deepcopy(tc_eqet)
     bc_eqet_copy = copy.deepcopy(bc_eqet)
 
@@ -231,7 +231,7 @@ def test_add_currents(tc_eqet, bc_eqet, meteo):
 
 
 def test_get_eqe_at_temperature(tc_eqet, bc_eqet):
-    # interpolate top cell to 25 °C
+    # interpolate top cell to 25 \degC
     # get_eqe_at_temperature returns one column per target temperature,
     # so njuncs == 1 when a scalar temperature is given.
     tc_25 = tc_eqet.get_eqe_at_temperature(25)
@@ -242,7 +242,7 @@ def test_get_eqe_at_temperature(tc_eqet, bc_eqet):
     assert np.all(tc_25.eqe >= 0)
     assert np.all(tc_25.eqe <= tc_eqet.eqe.max() + 1e-9)
 
-    # interpolate bottom cell to 100 °C (within measurement range)
+    # interpolate bottom cell to 100 \degC (within measurement range)
     # result has njuncs==1 regardless of the source (one column per target temp)
     bc_100 = bc_eqet.get_eqe_at_temperature(100)
     assert isinstance(bc_100, EQET)
@@ -254,13 +254,13 @@ def test_get_eqe_at_temperature(tc_eqet, bc_eqet):
 
 
 def test_get_eqe_at_temperature_bandgap_consistency(tc_eqet):
-    """Bandgap at interpolated 25 °C should match direct 25 °C measurement."""
-    # find the column index of the 25 °C measurement
+    r"""Bandgap at interpolated 25 \degC should match direct 25 \degC measurement."""
+    # find the column index of the 25 \degC measurement
     idx_25 = np.where(tc_eqet.temperature == 25)[0]
     if len(idx_25) == 0:
         pytest.skip("No 25 °C column in top-cell EQET data")
 
-    # measured bandgap at 25 °C (first junction)
+    # measured bandgap at 25 \degC (first junction)
     tc_25_meas = EQET(
         tc_eqet.wavelength,
         tc_eqet.eqe[:, idx_25],
@@ -268,7 +268,7 @@ def test_get_eqe_at_temperature_bandgap_consistency(tc_eqet):
     )
     bg_meas, _ = tc_25_meas.calc_Eg_Rau()
 
-    # interpolated bandgap at 25 °C
+    # interpolated bandgap at 25 \degC
     tc_25_interp = tc_eqet.get_eqe_at_temperature(25)
     bg_interp, _ = tc_25_interp.calc_Eg_Rau()
 
@@ -315,7 +315,7 @@ def test_get_current_for_temperature_no_spectra(tc_eqet):
 
 
 #################################################
-# run_ey — 2-terminal (Multi2T / CM)
+# run_ey -- 2-terminal (Multi2T / CM)
 #################################################
 
 
@@ -340,7 +340,7 @@ def _make_full_meteo(nsrdb_data, tc_eqet, bc_eqet, n=10):
     tc_eqet_c.add_spectra(wavelength, spectra_arr)
     bc_eqet_c.add_spectra(wavelength, spectra_arr)
 
-    # currents — target temperature array length must match number of spectra columns
+    # currents -- target temperature array length must match number of spectra columns
     tc_currents = tc_eqet_c.get_current_for_temperature(cell_temps, degrees=[1])
     bc_currents = bc_eqet_c.get_current_for_temperature(cell_temps, degrees=[1])
     tc_currents[tc_currents < 0] = 0
@@ -348,7 +348,7 @@ def _make_full_meteo(nsrdb_data, tc_eqet, bc_eqet, n=10):
     ey.add_currents(tc_currents)
     ey.add_currents(bc_currents)
 
-    # bandgaps — fit linear model to temperature-dependent bandgap
+    # bandgaps -- fit linear model to temperature-dependent bandgap
     tc_bg25, _ = tc_eqet.get_eqe_at_temperature(25).calc_Eg_Rau()
     bc_bg25, _ = bc_eqet.get_eqe_at_temperature(25).calc_Eg_Rau()
     tc_model = TemperatureModel.fit(
@@ -531,7 +531,7 @@ def test_meteo_filter_methods(meteo):
     filt_empty = ey.filter_ape(min_ape=10.0, max_ape=20.0)
     assert len(filt_empty.spectra) == 0
 
-    # filter_spectra: with default (0, 10) keeps all NSRDB rows (W/m²/nm well below 10)
+    # filter_spectra: with default (0, 10) keeps all NSRDB rows (W/m^2/nm well below 10)
     filt_spec = ey.filter_spectra(min_spectra=0, max_spectra=10)
     assert filt_spec is not ey
     assert len(filt_spec.spectra) == len(filt_spec.irradiance) == len(filt_spec.cell_temp)

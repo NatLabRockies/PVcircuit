@@ -2,14 +2,14 @@ import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-
-# Set to True once to write baseline test files, then revert to False
-REGENERATE_TEST_FILES = False
 import numpy as np
 import pytest
 
 import pvcircuit as pvc
 from pvcircuit import IV3T, Tandem3T
+
+# Set to True once to write baseline test files, then revert to False
+REGENERATE_TEST_FILES = False
 
 
 @pytest.fixture

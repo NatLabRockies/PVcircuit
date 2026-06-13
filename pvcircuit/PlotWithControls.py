@@ -200,8 +200,8 @@ class PlotsWithControls:
 
         """
         tand_layout = widgets.Layout(width="300px", height="40px")
-        vout_layout = widgets.Layout(width="180px", height="40px")
-        grid_layout = widgets.Layout(grid_template_columns="repeat(2, 180px)", grid_template_rows="repeat(3, 30px)", height="100px")
+        _vout_layout = widgets.Layout(width="180px", height="40px")
+        _grid_layout = widgets.Layout(grid_template_columns="repeat(2, 180px)", grid_template_rows="repeat(3, 30px)", height="100px")
         junc_layout = widgets.Layout(display="flex", flex_flow="row", justify_content="space-around")
         replot_types = [
             widgets.widgets.widget_float.BoundedFloatText,
@@ -230,8 +230,8 @@ class PlotsWithControls:
 
         def on_3Tchange(change):
             # function for changing values
-            old = change["old"]  # old value
-            new = change["new"]  # new value
+            _old = change["old"]  # old value (unused -- kept for callback signature documentation)
+            _new = change["new"]  # new value (unused)
             owner = change["owner"]  # control
             value = owner.value
             desc = owner.description
@@ -273,13 +273,13 @@ class PlotsWithControls:
             # recalculate
             ts = time()
             fitsp = class_to_plot.specialpoints(meastype=meastype, fast=fast)
-            if Iargs["density"] == True:
+            if Iargs["density"]:
                 fscale = 1000.0 / fitsp.area
             else:
                 fscale = 1000.0
             # summary line
             fmtstr = "Fit:  (Vzt = {0:>5.3f}, Vrz = {1:>5.3f}, Vtr = {2:>5.3f} V),   "
-            if Iargs["density"] == True:
+            if Iargs["density"]:
                 fmtstr += "(Jro = {3:>5.2f}, Jzo = {4:>5.2f}, Jto = {5:>5.2f} mA/mA)"
             else:
                 fmtstr += "(Iro = {3:>5.2f}, Izo = {4:>5.2f}, Ito = {5:>5.2f} mA)"
@@ -467,7 +467,7 @@ class PlotsWithControls:
         in_Ibut = widgets.Button(description="P(V)", button_style="success", tooltip="slow calculations")
         in_Vbut = widgets.Button(description="P(I)", button_style="success", tooltip="moderately fast calculations")
         in_Mbut = widgets.Button(description="MPPcalc", button_style="success", tooltip="fairly quick calculations")
-        tand_dict = {"name": in_name, "Rz": in_Rz}
+        _tand_dict = {"name": in_name, "Rz": in_Rz}
         # tandout = widgets.interactive_output(class_to_plot.set, tand_dict)
         tand_ui = widgets.HBox([in_tit, in_name, in_Rz, in_Mbut, in_Vbut, in_Ibut, in_Dbut, in_3Tbut, in_savefig])
 
@@ -689,11 +689,11 @@ class PlotsWithControls:
         use interactive_output for GUI in IPython
         """
         tand_layout = widgets.Layout(width="300px", height="40px")
-        vout_layout = widgets.Layout(width="180px", height="40px")
+        _vout_layout = widgets.Layout(width="180px", height="40px")
         junc_layout = widgets.Layout(display="flex", flex_flow="row", justify_content="space-around")
-        multi_layout = widgets.Layout(display="flex", flex_flow="row", justify_content="space-around")
+        _multi_layout = widgets.Layout(display="flex", flex_flow="row", justify_content="space-around")
 
-        replot_types = [
+        _replot_types = [
             widgets.widgets.widget_float.BoundedFloatText,
             widgets.widgets.widget_int.BoundedIntText,
             widgets.widgets.widget_int.IntSlider,
@@ -703,17 +703,17 @@ class PlotsWithControls:
 
         def on_EQEchange(change):
             # function for changing values
-            old = change["old"]  # old value
-            new = change["new"]  # new value
+            _old = change["old"]  # old value (handler body commented out)
+            _new = change["new"]  # new value
             owner = change["owner"]  # control
-            value = owner.value
-            desc = owner.description
+            _value = owner.value
+            _desc = owner.description
             # with self.debugout: print('Mcontrol: ' + desc + '->', value)
             # class_to_plot.set(**{desc:value})
 
         def on_EQEreplot(change):
             # change info
-            fast = True
+            _fast = True
             if type(change) is widgets.widgets.widget_button.Button:
                 owner = change
             else:  # other controls
@@ -721,7 +721,7 @@ class PlotsWithControls:
                 value = owner.value
             desc = owner.description
             if desc == "Recalc":
-                fast = False
+                _fast = False  # underscore prefix marks intentional unused reassignment
 
             # recalculate
             ts = time()
@@ -754,7 +754,7 @@ class PlotsWithControls:
                     linelabel = line.get_label()
                     # with self.debugout: print(linelabel)
                     if linelabel in pvc.qe.refnames:
-                        if specname == None:  # desc == 'spec'
+                        if specname is None:  # desc == 'spec'
                             specname = linelabel
                             Pspec = specname
                         else:
@@ -899,7 +899,7 @@ class PlotsWithControls:
         tand_layout = widgets.Layout(width="300px", height="40px")
         vout_layout = widgets.Layout(width="180px", height="40px")
         junc_layout = widgets.Layout(display="flex", flex_flow="row", justify_content="space-around")
-        multi_layout = widgets.Layout(display="flex", flex_flow="row", justify_content="space-around")
+        _multi_layout = widgets.Layout(display="flex", flex_flow="row", justify_content="space-around")
 
         replot_types = [
             widgets.widgets.widget_float.BoundedFloatText,
@@ -911,8 +911,8 @@ class PlotsWithControls:
 
         def on_2Tchange(change):
             # function for changing values
-            old = change["old"]  # old value
-            new = change["new"]  # new value
+            _old = change["old"]  # old value (unused -- kept for callback signature documentation)
+            _new = change["new"]  # new value (unused)
             owner = change["owner"]  # control
             value = owner.value
             desc = owner.description
@@ -1099,13 +1099,15 @@ class PlotsWithControls:
 
         ToutBox = widgets.HBox([Lout, Rout], layout=junc_layout)
 
-        # numerical outputs
-        out_Voc = widgets.Text(value="Voc", description="Voc", disabled=True, layout=vout_layout)
-        out_Isc = widgets.Text(value="Isc", description="Isc", disabled=True, layout=vout_layout)
-        out_FF = widgets.Text(value="FF", description="FF", disabled=True, layout=vout_layout)
-        out_Pmp = widgets.Text(value="Pmp", description="Pmp", disabled=True, layout=vout_layout)
-        out_Vmp = widgets.Text(value="Vmp", description="Vmp", disabled=True, layout=vout_layout)
-        out_Imp = widgets.Text(value="Imp", description="Imp", disabled=True, layout=vout_layout)
+        # numerical outputs (kept for future VoutBox.HBox composition below; the
+        # HBox line is currently commented out so prefix names with `_` to
+        # satisfy lint without losing the widget definitions).
+        _out_Voc = widgets.Text(value="Voc", description="Voc", disabled=True, layout=vout_layout)
+        _out_Isc = widgets.Text(value="Isc", description="Isc", disabled=True, layout=vout_layout)
+        _out_FF = widgets.Text(value="FF", description="FF", disabled=True, layout=vout_layout)
+        _out_Pmp = widgets.Text(value="Pmp", description="Pmp", disabled=True, layout=vout_layout)
+        _out_Vmp = widgets.Text(value="Vmp", description="Vmp", disabled=True, layout=vout_layout)
+        _out_Imp = widgets.Text(value="Imp", description="Imp", disabled=True, layout=vout_layout)
         # VoutBox = widgets.HBox([in_tit,out_Voc,out_Isc,out_FF,out_Pmp,out_Vmp,out_Imp])
 
         # tandem3T controls
@@ -1114,7 +1116,7 @@ class PlotsWithControls:
         in_Rs2T = widgets.FloatLogSlider(value=class_to_plot.Rs2T, base=10, min=-6, max=3, step=0.01, description="Rs2T", layout=tand_layout, readout_format=".2e")
         in_2Tbut = widgets.Button(description="Recalc", button_style="success", tooltip="slow calculations")
         in_savefig = widgets.Button(description="savefig", button_style="success", tooltip="save figures")
-        tand_dict = {"name": in_name, "Rs2T": in_Rs2T}
+        _tand_dict = {"name": in_name, "Rs2T": in_Rs2T}
         # tandout = widgets.interactive_output(class_to_plot.set, tand_dict)
         tand_ui = widgets.HBox([in_tit, in_name, in_Rs2T, in_2Tbut, in_savefig])
 
@@ -1159,7 +1161,7 @@ class PlotsWithControls:
         dpnts = Idark.size  # redefine
         Vdark = np.full(dpnts, np.nan, dtype=np.float64)  # Vtotal
         Vdarkmid = np.full((dpnts, class_to_plot.njuncs), np.nan, dtype=np.float64)  # Vmid[pnt, junc]
-        for ii, I in enumerate(Idark):
+        for ii, I in enumerate(Idark):  # noqa: E741 (I is the PV convention for current)
             Vdark[ii] = class_to_plot.V2T(I)  # also sets class_to_plot.Vmid[i]
             for junc in range(class_to_plot.njuncs):
                 Vdarkmid[ii, junc] = class_to_plot.Vmid[junc]
@@ -1173,16 +1175,16 @@ class PlotsWithControls:
 
     def calcLight(self, class_to_plot, pnts=21, Vmin=-0.5, timer=False, fast=False):
         # calc light IV
-        Jext_list = class_to_plot.proplist("Jext")  # remember list external photocurrents
-        areas = class_to_plot.proplist("lightarea")  # list of junction areas
+        _Jext_list = class_to_plot.proplist("Jext")  # remember list external photocurrents (unused; kept for parity with calcDark/plot)
+        _areas = class_to_plot.proplist("lightarea")  # list of junction areas (unused; see commented-out Imax computation below)
         # Imax = max([j*a for j,a in zip(Jext_list,areas)])
         Imax = class_to_plot.Imaxrev()
         Eg_list = class_to_plot.proplist("Eg")  # list of Eg
-        Egmax = sum(Eg_list)
+        _Egmax = sum(Eg_list)
 
         # ndarray functions
-        V2Tvect = np.vectorize(class_to_plot.V2T)
-        I2Tvect = np.vectorize(class_to_plot.I2T)
+        _V2Tvect = np.vectorize(class_to_plot.V2T)  # unused (vectorised paths are inlined below)
+        _I2Tvect = np.vectorize(class_to_plot.I2T)  # unused
 
         MPP = class_to_plot.MPP()  # calculate all just once
         Voc = MPP["Voc"]
@@ -1193,7 +1195,7 @@ class PlotsWithControls:
         # VxI = V2Tvect(IxI)
         VxI = np.full(pnts, np.nan, dtype=np.float64)  # Vtotal
         VmidxI = np.full((pnts, class_to_plot.njuncs), np.nan, dtype=np.float64)  # Vmid[pnt, junc]
-        for ii, I in enumerate(IxI):
+        for ii, I in enumerate(IxI):  # noqa: E741 (I is the PV convention for current)
             VxI[ii] = class_to_plot.V2T(I)  # also sets class_to_plot.Vmid[i]
             for junc in range(class_to_plot.njuncs):
                 VmidxI[ii, junc] = class_to_plot.Vmid[junc]
@@ -1244,7 +1246,7 @@ class PlotsWithControls:
         # plot a light IV of Multi2T
 
         Jext_list = class_to_plot.proplist("Jext")  # remember list external photocurrents
-        areas = class_to_plot.proplist("lightarea")  # list of junction areas
+        _areas = class_to_plot.proplist("lightarea")  # list of junction areas (unused; kept for parity)
         # Imax = max([j*a for j,a in zip(Jext_list,areas)])
         Imax = class_to_plot.Imaxrev()
         Eg_list = class_to_plot.proplist("Eg")  # list of Eg
@@ -1252,13 +1254,13 @@ class PlotsWithControls:
         scale = 1000.0
 
         # ndarray functions
-        V2Tvect = np.vectorize(class_to_plot.V2T)
-        I2Tvect = np.vectorize(class_to_plot.I2T)
+        _V2Tvect = np.vectorize(class_to_plot.V2T)  # unused (vectorised paths inlined inside calcDark/calcLight)
+        _I2Tvect = np.vectorize(class_to_plot.I2T)  # unused
 
         if class_to_plot.name:
             title += class_to_plot.name
 
-        if dark == None:
+        if dark is None:
             if math.isclose(class_to_plot.Isc(), 0.0, abs_tol=1e-6):
                 dark = True
             else:
