@@ -412,6 +412,149 @@ def test_run_ey_3T(nsrdb_data, tc_eqet, bc_eqet):
     assert 0 < ey_eff < 1
 
 
+#################################################
+# Module-level helper functions
+#################################################
+
+
+def test_VMlist():
+    """VMlist generates the documented ordered list of VM configurations."""
+    from pvcircuit.EY import VMlist
+
+    result = VMlist(3)
+    # Always starts with the two non-VM configs in this order
+    assert result[0] == "MPP"
+    assert result[1] == "CM"
+    # All VM entries follow the VMmn convention with m > n >= 1
+    vm_entries = result[2:]
+    for entry in vm_entries:
+        assert entry.startswith("VM")
+        assert len(entry) == 4
+        m, n = int(entry[2]), int(entry[3])
+        assert m > n >= 1
+        # No common factor of 2/3/5 (coprime under these primes per implementation)
+        for prime in (2, 3, 5):
+            assert not (m % prime == 0 and n % prime == 0)
+
+    # Specific known values for mmax=3
+    assert "VM21" in result
+    assert "VM31" in result
+    assert "VM32" in result
+
+    # mmax > 9 raises
+    with pytest.raises(ValueError, match="smaller than 10"):
+        VMlist(10)
+
+
+def test_VMloss_known_configs():
+    """VMloss returns documented loss factors for canonical operations."""
+    from pvcircuit.EY import VMloss
+
+    tandem3T = pvc.Tandem3T()
+    multi2T = pvc.Multi2T()
+
+    # Multi2T always returns 1 regardless of oper
+    assert VMloss(multi2T, "CM", 6) == 1
+    assert VMloss(multi2T, "MPP", 12) == 1
+
+    # Tandem3T: MPP and CM both return 1
+    assert VMloss(tandem3T, "MPP", 6) == 1
+    assert VMloss(tandem3T, "CM", 6) == 1
+
+    # VM-21-r: endloss = max(2,1)-1 = 1, lossfactor = 1 - 1/6 = 5/6
+    np.testing.assert_allclose(VMloss(tandem3T, "VM-21-r", 6), 5 / 6)
+    # VM-21-s: endloss = (2+1)-1 = 2, lossfactor = 1 - 2/6 = 4/6
+    np.testing.assert_allclose(VMloss(tandem3T, "VM-21-s", 6), 4 / 6)
+    # VM-32-r: endloss = max(3,2)-1 = 2, lossfactor = 1 - 2/10 = 8/10
+    np.testing.assert_allclose(VMloss(tandem3T, "VM-32-r", 10), 8 / 10)
+    # Floor at 0 when ncells too small: endloss=2 > ncells=1 -> 0
+    assert VMloss(tandem3T, "VM-32-r", 1) == 0
+
+    # Malformed VM operation raises
+    with pytest.raises(ValueError, match="VM-"):
+        VMloss(tandem3T, "VM-21", 6)
+    # Invalid r/s suffix raises (function falls through; endloss undefined)
+    with pytest.raises((ValueError, UnboundLocalError)):
+        VMloss(tandem3T, "VM-21-x", 6)
+
+
+def test_sandia_T_pvlib_parity():
+    """pvcircuit.EY.sandia_T matches pvlib's open_rack_cell_polymerback model."""
+    from pvcircuit.EY import sandia_T
+
+    # Parameters hard-coded in sandia_T (open_rack_cell_polymerback)
+    a, b, deltaT = -3.56, -0.075, 3.0
+
+    poa = np.array([100.0, 500.0, 800.0, 1000.0])
+    wind = np.array([0.0, 1.0, 2.0, 5.0])
+    tair = np.array([10.0, 25.0, 30.0, 35.0])
+
+    # Hand-roll the Sandia SAPM cell temperature formula
+    temp_module = poa * np.exp(a + b * wind) + tair
+    expected = temp_module + (poa / 1000.0) * deltaT
+
+    np.testing.assert_allclose(sandia_T(poa, wind, tair), expected, rtol=1e-12)
+
+    # Scalar inputs work too
+    np.testing.assert_allclose(
+        sandia_T(1000.0, 0.0, 25.0),
+        25.0 + 1000.0 * np.exp(a) + 3.0,
+        rtol=1e-12,
+    )
+
+
+def test_meteo_filter_methods(meteo):
+    """filter_ape, filter_spectra, filter_custom, calc_ape, reindex."""
+    ey = copy.deepcopy(meteo)
+    n = len(ey.datetime)
+
+    # calc_ape populates average_photon_energy
+    assert ey.average_photon_energy is None
+    ey.calc_ape()
+    assert ey.average_photon_energy is not None
+    assert len(ey.average_photon_energy) == n
+    # APE for daylight solar spectra is typically ~1.5 - 2.0 eV
+    finite_ape = ey.average_photon_energy[np.isfinite(ey.average_photon_energy)]
+    assert np.all(finite_ape > 1.0)
+    assert np.all(finite_ape < 3.0)
+
+    # filter_ape returns a new Meteo, keeps points in range
+    n_full = len(ey.spectra)
+    filt_ape = ey.filter_ape(min_ape=1.0, max_ape=3.0)
+    assert filt_ape is not ey
+    assert len(filt_ape.spectra) == len(filt_ape.irradiance) == len(filt_ape.cell_temp)
+    assert len(filt_ape.spectra) <= n_full
+
+    # Restrictive filter drops everything
+    filt_empty = ey.filter_ape(min_ape=10.0, max_ape=20.0)
+    assert len(filt_empty.spectra) == 0
+
+    # filter_spectra: with default (0, 10) keeps all NSRDB rows (W/m²/nm well below 10)
+    filt_spec = ey.filter_spectra(min_spectra=0, max_spectra=10)
+    assert filt_spec is not ey
+    assert len(filt_spec.spectra) == len(filt_spec.irradiance) == len(filt_spec.cell_temp)
+    assert len(filt_spec.spectra) <= n_full
+
+    # filter_custom with boolean mask
+    mask = np.zeros(n, dtype=bool)
+    mask[: n // 2] = True  # keep first half
+    filt_custom = ey.filter_custom(mask)
+    assert filt_custom is not ey
+    assert len(filt_custom.spectra) == n // 2
+
+    # reindex: shift datetime by a value smaller than tolerance returns matched data,
+    # larger than tolerance returns NaN-filled rows.
+    new_idx = ey.datetime + pd.Timedelta(seconds=10)
+    reidx = ey.reindex(new_idx, method="nearest", tolerance=pd.Timedelta(seconds=30))
+    assert reidx is not ey
+    assert len(reidx.spectra) == n
+
+
+#################################################
+# Test-file generator
+#################################################
+
+
 def generate_test_files():
     """Generate all baseline CSV test files.
 

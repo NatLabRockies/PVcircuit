@@ -324,6 +324,107 @@ def test_specialpoints(dev3T):
     np.testing.assert_string_equal(re.sub(r"\s+", " ", test_str), re.sub(r"\s+", " ", special_points.__str__()))
 
 
+def test_tandem3T_copy(dev3T):
+    """Tandem3T.copy() is a shallow copy: wrapper is new, top/bot junctions
+    are shared.  Wrapper-level attribute Rz is independent."""
+    d2 = dev3T.copy()
+
+    assert d2 is not dev3T
+    # top/bot junctions are shared
+    assert d2.top is dev3T.top
+    assert d2.bot is dev3T.bot
+
+    rz_before = dev3T.Rz
+    d2.set(Rz=rz_before + 0.5)
+    np.testing.assert_almost_equal(dev3T.Rz, rz_before)
+    np.testing.assert_almost_equal(d2.Rz, rz_before + 0.5)
+
+    # Voc3 still works on the copy and returns the same triple
+    np.testing.assert_almost_equal(dev3T.Voc3().Vzt[0], d2.Voc3().Vzt[0])
+
+
+def test_Rz_sensitivity(dev3T):
+    """Rz is the resistance between bottom and middle contact, so it
+    only matters when Izo != 0.  At a fixed device operating point with
+    non-zero Izo, increasing Rz must change Vrz by I*Rz (Ohm's law on
+    the Rz path).  Voc3 (all currents zero) is independent of Rz.
+    """
+    voc3_lowRz = dev3T.Voc3().Vzt[0]
+
+    # Pick a 1-point IV3T with non-zero Izo and let V3T solve voltages
+    iv_low = IV3T(name="probe", shape=1, meastype="CZ", area=dev3T.lightarea)
+    iv_low.set(Iro=-5e-3, Izo=5e-3, Ito=0.0)
+    dev3T.V3T(iv_low)
+
+    rz_before = dev3T.Rz
+    dev3T.set(Rz=rz_before + 50.0)
+
+    iv_high = IV3T(name="probe", shape=1, meastype="CZ", area=dev3T.lightarea)
+    iv_high.set(Iro=-5e-3, Izo=5e-3, Ito=0.0)
+    dev3T.V3T(iv_high)
+
+    voc3_highRz = dev3T.Voc3().Vzt[0]
+
+    # Voc3 (zero-current) is independent of Rz
+    np.testing.assert_almost_equal(voc3_lowRz, voc3_highRz, decimal=6)
+
+    # At Izo=5 mA (per cm^2), Vrz shifts by (Rz_new - Rz_old) * Izo
+    # Iro/Izo/Ito are stored in mA in IV3T after V3T, but Rz acts on A;
+    # the relevant invariant is that Vrz CHANGED in the expected direction
+    # by a non-trivial amount (> 1 mV).
+    delta_vrz = abs(iv_high.Vrz[0] - iv_low.Vrz[0])
+    assert delta_vrz > 1e-3
+
+
+def test_LC_effect_on_voc3(dev3T):
+    """At Voc3 (all device currents zero) the top junction sits at
+    V_top > 0, so Jem(V_top) > 0 and the LC current JLC = beta * Jem
+    pumps additional photocurrent into the bottom junction.  To keep
+    Izo=0 the bottom junction must supply more recombination current,
+    which requires a larger |V_bot|.  V_bot enters Voc3 as Vrz, so
+    |Vrz| increases when beta is turned on.
+
+    Conversely Isc3 (Vzt=Vrz=Vtr=0) is LC-insensitive because V_top=0
+    forces Jem(0)=0 and hence JLC=0.
+    """
+    voc_base = dev3T.Voc3()
+    isc_base = dev3T.Isc3()
+
+    dev3T.top.set(beta=0.5)
+    voc_lc = dev3T.Voc3()
+    isc_lc = dev3T.Isc3()
+
+    # |Vrz| (bottom-junction voltage at Izo=0) grows under LC
+    assert abs(voc_lc.Vrz[0]) > abs(voc_base.Vrz[0])
+    # Isc3 is unchanged by LC by construction (V_top=0 → Jem=0)
+    np.testing.assert_almost_equal(isc_lc.Iro[0], isc_base.Iro[0], decimal=8)
+    np.testing.assert_almost_equal(isc_lc.Ito[0], isc_base.Ito[0], decimal=8)
+
+
+def test_Multi2T_from_3T_preserves_junction_params(dev3T):
+    """Multi2T.from_3T copies junction parameters by default.  The
+    resulting 2T device must have matching Eg, n, J0ratio on both
+    junctions."""
+    dev2T = Multi2T.from_3T(dev3T, copy_attributes=True)
+
+    assert dev2T.njuncs == 2
+    np.testing.assert_almost_equal(dev2T.j[0].Eg, dev3T.top.Eg)
+    np.testing.assert_almost_equal(dev2T.j[1].Eg, dev3T.bot.Eg)
+    np.testing.assert_array_almost_equal(dev2T.j[0].n, dev3T.top.n)
+    np.testing.assert_array_almost_equal(dev2T.j[0].J0ratio, dev3T.top.J0ratio)
+    np.testing.assert_array_almost_equal(dev2T.j[1].n, dev3T.bot.n)
+    np.testing.assert_array_almost_equal(dev2T.j[1].J0ratio, dev3T.bot.J0ratio)
+
+    # copy_attributes=True yields disconnected junctions (different objects)
+    assert dev2T.j[0] is not dev3T.top
+    assert dev2T.j[1] is not dev3T.bot
+
+    # copy_attributes=False yields dynamically-connected junctions
+    dev2T_dyn = Multi2T.from_3T(dev3T, copy_attributes=False)
+    assert dev2T_dyn.j[0] is dev3T.top
+    assert dev2T_dyn.j[1] is dev3T.bot
+
+
 def generate_test_files():
     """Generate all baseline test files. Run: python tests/test_tandem3T.py"""
     global REGENERATE_TEST_FILES

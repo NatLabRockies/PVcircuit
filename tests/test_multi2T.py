@@ -157,6 +157,83 @@ def test_4j():
     np.testing.assert_allclose(mpp["Imp"], 0.011073118854968986, rtol=1e-5)
 
 
+def test_multi2T_copy(dev2T):
+    """Multi2T.copy() returns a new wrapper, but is a SHALLOW copy
+    (per the source docstring: deepcopy crashes).  Therefore the
+    junction list and its elements are shared with the original.
+    Mutating the wrapper-level attribute Rs2T is independent; mutating
+    a junction inside the copy mutates the original too.
+    """
+    m2 = dev2T.copy()
+
+    # wrapper objects are distinct
+    assert m2 is not dev2T
+
+    # but the junction list and elements ARE shared (shallow copy)
+    assert m2.j is dev2T.j
+    assert m2.j[0] is dev2T.j[0]
+    assert m2.j[1] is dev2T.j[1]
+
+    # wrapper-level attribute set via .set() is independent on the copy
+    rs_before = dev2T.Rs2T
+    m2.set(Rs2T=rs_before + 1.0)
+    np.testing.assert_almost_equal(dev2T.Rs2T, rs_before)
+    np.testing.assert_almost_equal(m2.Rs2T, rs_before + 1.0)
+
+    # MPP gives the same numerical result on both wrappers
+    mpp1 = dev2T.MPP()
+    mpp2 = m2.MPP()
+    np.testing.assert_allclose(mpp1["Voc"], mpp2["Voc"])
+    np.testing.assert_allclose(mpp1["Isc"], mpp2["Isc"])
+
+
+def test_multi2T_append_junction(dev2T, junction):
+    """append_junction adds one Junction to the series stack, bumps
+    njuncs and Vmid length, and updates Rs2T to a parallel-area sum."""
+    n0 = dev2T.njuncs
+    assert len(dev2T.Vmid) == n0
+
+    dev2T.append_junction(junction)
+
+    # one more junction in the stack
+    assert dev2T.njuncs == n0 + 1
+    assert len(dev2T.j) == n0 + 1
+    assert len(dev2T.Vmid) == n0 + 1
+    # newest junction is at the end and was copied (not the same object)
+    assert dev2T.j[-1] is not junction
+    np.testing.assert_array_equal(dev2T.j[-1].n, junction.n)
+    np.testing.assert_almost_equal(dev2T.j[-1].Eg, junction.Eg)
+
+    # Adding a second junction works identically
+    dev2T.append_junction(pvc.junction.Junction())
+    assert dev2T.njuncs == n0 + 2
+
+    # MPP solver still produces a finite Voc with the extended stack
+    mpp = dev2T.MPP()
+    assert np.isfinite(mpp["Voc"])
+    assert np.isfinite(mpp["Isc"])
+
+
+def test_I2Troot_at_boundaries(dev2T):
+    """I2Troot must agree with I2T at exactly V=Voc (current = 0) and
+    return the (negative) short-circuit current at exactly V=0.  These
+    boundary points are where the root finder is most likely to choke."""
+    voc = dev2T.Voc()
+    isc = dev2T.Isc()
+
+    # At Voc both solvers must return ~0
+    np.testing.assert_almost_equal(dev2T.I2T(voc), 0.0, decimal=5)
+    np.testing.assert_almost_equal(dev2T.I2Troot(voc), 0.0, decimal=5)
+
+    # At V=0 both solvers must return -Isc (current extraction convention)
+    np.testing.assert_almost_equal(dev2T.I2T(0.0), -isc, decimal=5)
+    np.testing.assert_almost_equal(dev2T.I2Troot(0.0), -isc, decimal=5)
+
+    # Slightly beyond Voc: current must be strictly positive (forward injection)
+    assert dev2T.I2T(voc + 1e-3) > 0
+    assert dev2T.I2Troot(voc + 1e-3) > 0
+
+
 def plot_2T():
 
     dev2T = Multi2T()

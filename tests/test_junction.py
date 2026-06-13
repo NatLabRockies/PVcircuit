@@ -218,6 +218,80 @@ def test_JV(junction_1d):
     # plt.show()
 
 
+def test_junction_copy(junction_2d):
+    """Junction.copy() must produce an independent object: mutating one
+    must not affect the other.  n, J0ratio, and RBB_dict are duplicated
+    explicitly (deepcopy crashes per the class docstring)."""
+
+    junction_2d.set(RBB="JFG")
+    j_copy = junction_2d.copy()
+
+    # different python objects, same content
+    assert j_copy is not junction_2d
+    np.testing.assert_array_equal(j_copy.n, junction_2d.n)
+    np.testing.assert_array_equal(j_copy.J0ratio, junction_2d.J0ratio)
+    assert j_copy.RBB_dict == junction_2d.RBB_dict
+    assert j_copy.Eg == junction_2d.Eg
+    assert j_copy.TC == junction_2d.TC
+
+    # the three explicitly-copied containers must be independent
+    assert j_copy.n is not junction_2d.n
+    assert j_copy.J0ratio is not junction_2d.J0ratio
+    assert j_copy.RBB_dict is not junction_2d.RBB_dict
+
+    # mutate the copy through the controlled setter; original stays put
+    n_before = junction_2d.n.copy()
+    j_copy.set(n=[1.5, 2.5])
+    np.testing.assert_array_equal(junction_2d.n, n_before)
+    np.testing.assert_array_equal(j_copy.n, [1.5, 2.5])
+
+    j_copy.set(RBB=None)
+    assert junction_2d.RBB_dict["method"] == "JFG"
+    assert j_copy.RBB_dict["method"] is None
+
+
+def test_junction_Jparallel(junction_2d):
+    """Jparallel(V, Jtot) zeroes out at the V that Vdiode(Jdiode) finds."""
+
+    # At Vdiode(Jdiode=0), Jtot = Jphoto and Jparallel must vanish
+    # (only to Brent solver tolerance, which is VTOL ~ 1e-6).
+    v = junction_2d.Vdiode(0)
+    residual = junction_2d.Jparallel(v, junction_2d.Jphoto)
+    np.testing.assert_almost_equal(residual, 0.0, decimal=5)
+
+    # For a notdiode (sum(J0)=0), Jparallel returns Jtot unchanged.
+    junction_2d.set(J0ratio=[0, 0])
+    np.testing.assert_almost_equal(junction_2d.Jparallel(0.5, 1.234), 1.234)
+
+
+def test_junction_RBB_dict(junction_2d):
+    """RBB shortcut populates a method-specific parameter dict; switching
+    methods rebuilds the dict; bishop vs JFG give different breakdown shapes."""
+
+    # 'JFG' shortcut
+    junction_2d.set(RBB="JFG")
+    assert junction_2d.RBB_dict["method"] == "JFG"
+    for key in ("mrb", "J0rb", "Vrb"):
+        assert key in junction_2d.RBB_dict
+
+    # 'bishop' shortcut rebuilds dict with different keys (no J0rb, has avalanche)
+    junction_2d.set(RBB="bishop")
+    assert junction_2d.RBB_dict["method"] == "bishop"
+    assert "avalanche" in junction_2d.RBB_dict
+    assert "J0rb" not in junction_2d.RBB_dict
+
+    # Setting J0rb while in bishop mode is rejected
+    with pytest.raises(ValueError, match=r"invalid class attribute J0rb"):
+        junction_2d.set(J0rb=1)
+
+    # Any other RBB value disables breakdown (method=None)
+    junction_2d.set(RBB="not_a_real_method")
+    assert junction_2d.RBB_dict == {"method": None}
+    # And JshuntRBB then only returns the ohmic shunt Vd * Gsh
+    junction_2d.set(Gsh=1e-4)
+    np.testing.assert_almost_equal(junction_2d.JshuntRBB(-2.0), -2.0 * 1e-4)
+
+
 def generate_test_files():
     """Generate all baseline test files. Run: python tests/test_junction.py"""
     global REGENERATE_TEST_FILES

@@ -210,20 +210,20 @@ def test_set(iv3t):
         iv3t.set(invalid_key=123)
 
 
-def test_line(iv3t):
+def test_line_math(iv3t):
     iv3t.line("Iro", 0.1, 1, 11, "Vrz", "-x")
     np.testing.assert_array_almost_equal(iv3t.Vrz, iv3t.Iro * -1)
     iv3t.line("Izo", 0.1, 1, 11, "Vrz", "x")
     np.testing.assert_array_almost_equal(iv3t.Vrz, iv3t.Izo * 1)
 
 
-def test_box(iv3t):
+def test_box_math(iv3t):
     iv3t.box("Iro", 0, 10, 11, "Vrz", 0, 5, 6)
     np.testing.assert_array_almost_equal(iv3t.Iro, np.tile(np.linspace(0, 10, 11), (6, 1)))
     np.testing.assert_array_almost_equal(iv3t.Vrz, np.repeat(np.linspace(0, 5, 6).reshape(-1, 1), 11, axis=1))
 
 
-def test_nanpnt(iv3t):
+def test_nanpnt_index(iv3t):
     iv3t.box("Iro", 0, 10, 11, "Vrz", 0, 5, 6)
     iv3t.nanpnt((1,))
     np.testing.assert_array_equal(iv3t.Iro[1], np.nan)

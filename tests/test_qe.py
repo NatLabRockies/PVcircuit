@@ -232,6 +232,85 @@ def test_TemperatureModel():
     np.testing.assert_almost_equal(model.apply(50, 1.0), y[1])
 
 
+def test_LCcorr(example_eqe):
+    """LCcorr applies the Steiner 2013 luminescent-coupling correction.
+    With all etas = 0 the corrected EQE equals the raw EQE.  Setting
+    eta[1,0] > 0 leaves the first-junction's corrected EQE untouched
+    (always raw[:,0]) and changes the second junction's corrected EQE
+    per the Steiner formula corrEQE[:,1] = raw[:,1]*(1+eta) - raw[:,0]*eta.
+    """
+    # Default: all etas zero -> corrEQE == raw EQE
+    example_eqe.LCcorr()
+    np.testing.assert_array_almost_equal(example_eqe.corrEQE, example_eqe.eqe)
+
+    # First-junction's corrected EQE is the raw value regardless of any etas
+    raw_top_before = example_eqe.eqe[:, 0].copy()
+
+    # Set eta[1, 0] = 0.1 — couples top→bot
+    example_eqe.LCcorr(junc=1, dist=0, val=0.1)
+    np.testing.assert_array_almost_equal(example_eqe.corrEQE[:, 0], raw_top_before)
+
+    # Bottom-junction's corrected EQE follows the Steiner formula
+    eta = 0.1
+    expected_bot = example_eqe.eqe[:, 1] * (1.0 + eta) - example_eqe.eqe[:, 0] * eta
+    np.testing.assert_array_almost_equal(example_eqe.corrEQE[:, 1], expected_bot)
+
+    # Setting eta back to 0 reverts the bot correction to the raw EQE
+    example_eqe.LCcorr(junc=1, dist=0, val=0.0)
+    np.testing.assert_array_almost_equal(example_eqe.corrEQE[:, 1], example_eqe.eqe[:, 1])
+
+
+def test_EQET_extrapolation_beyond_data(example_eqeT):
+    """get_eqe_at_temperature uses scipy interp1d with fill_value='extrapolate',
+    and clips negative results to zero.  Extrapolating well beyond the
+    measured temperature range must therefore return a valid EQET object
+    (no crash, no negatives)."""
+    t_min = float(example_eqeT.temperature.min())
+    t_max = float(example_eqeT.temperature.max())
+
+    # Inside the measured range
+    inside = example_eqeT.get_eqe_at_temperature(t_min + 1.0)
+    assert isinstance(inside, pvc.qe.EQET)
+    assert np.all(inside.eqe >= 0)
+
+    # Well above the measured range: extrapolation, no crash, clipped to [0, max]
+    above = example_eqeT.get_eqe_at_temperature(t_max + 50.0)
+    assert isinstance(above, pvc.qe.EQET)
+    assert above.njuncs == 1
+    np.testing.assert_array_equal(above.wavelength, example_eqeT.wavelength)
+    assert np.all(above.eqe >= 0)
+    assert np.all(above.eqe <= example_eqeT.eqe.max() + 1e-9)
+
+    # Well below the measured range: same protections
+    below = example_eqeT.get_eqe_at_temperature(t_min - 50.0)
+    assert isinstance(below, pvc.qe.EQET)
+    assert np.all(below.eqe >= 0)
+    assert np.all(below.eqe <= example_eqeT.eqe.max() + 1e-9)
+
+
+def test_EQE_add_eqe(example_eqe):
+    """add_eqe appends one more junction column at potentially-different
+    wavelengths.  njuncs increments by one, eqe gains one column, and the
+    sjuncs label list grows.  New wavelengths outside the original range
+    are zero-padded by the interp1d fill_value=0."""
+    n_before = example_eqe.njuncs
+    sjuncs_before = list(example_eqe.sjuncs)
+
+    waves = np.arange(300, 1200)
+    eqe_extra = np.ones_like(waves) * 0.5
+    example_eqe.add_eqe(waves, eqe_extra, sjuncs="extra_junc")
+
+    assert example_eqe.njuncs == n_before + 1
+    assert example_eqe.eqe.shape[1] == n_before + 1
+    assert example_eqe.sjuncs == sjuncs_before + ["extra_junc"]
+
+    # New column is the last one — outside [300, 1200] it must be zero-padded
+    new_col = example_eqe.eqe[:, -1]
+    outside_mask = example_eqe.wavelength.flatten() > waves.max()
+    if outside_mask.any():
+        np.testing.assert_array_equal(new_col[outside_mask], 0)
+
+
 if __name__ == "__main__":
 
     example_eqe = get_measured_eqe()

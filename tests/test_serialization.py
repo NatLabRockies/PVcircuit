@@ -117,3 +117,36 @@ def test_Multi2T():
 def test_Tandem3T():
     tandem3t = Tandem3T()
     run_serialization_test(tandem3t)
+
+
+def test_EQET():
+    """EQET round-trip: same data shape, temperature axis preserved."""
+    from pvcircuit.qe import EQET
+
+    waves = np.arange(300, 1200, 10)
+    temperatures = np.array([25, 50, 75])
+    # eqe shape (N_wvl, N_temp)
+    eqe_data = np.tile(np.linspace(0.1, 0.9, len(waves))[:, np.newaxis], (1, len(temperatures)))
+    eqet = EQET(waves, eqe_data, temperatures)
+    run_serialization_test(eqet)
+
+
+def test_Meteo():
+    """Meteo round-trip: small synthetic time-series, no external file needed."""
+    import pandas as pd
+    from pvcircuit.EY import Meteo
+
+    n = 5
+    waves = np.arange(300, 1200, 50)
+    idx = pd.date_range("2024-06-01 09:00", periods=n, freq="1h", tz="UTC")
+    # spectra: (n, N_wvl) DataFrame indexed by datetime
+    spectra = pd.DataFrame(
+        np.tile(np.linspace(0.5, 1.5, len(waves)), (n, 1)),
+        index=idx,
+        columns=waves,
+    )
+    temp = pd.Series(np.linspace(15.0, 25.0, n), index=idx)
+    wind = pd.Series(np.linspace(1.0, 3.0, n), index=idx)
+
+    meteo = Meteo(waves, spectra, temp, wind, idx)
+    run_serialization_test(meteo)
