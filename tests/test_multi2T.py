@@ -3,15 +3,15 @@ import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-
-# Set to True once to write baseline test files, then revert to False
-REGENERATE_TEST_FILES = False
 import numpy as np
 import pytest
 from pvlib import ivtools, pvsystem
 
 import pvcircuit as pvc
 from pvcircuit import Multi2T, Tandem3T
+
+# Set to True once to write baseline test files, then revert to False
+REGENERATE_TEST_FILES = False
 
 
 @pytest.fixture
@@ -291,7 +291,8 @@ def generate_test_files():
     REGENERATE_TEST_FILES = True
 
     dev2T = Multi2T()
-    print("Generating Multi2T_str.txt..."); test_multi2T_str(dev2T)
+    print("Generating Multi2T_str.txt...")
+    test_multi2T_str(dev2T)
 
     REGENERATE_TEST_FILES = False
     print("Done!")

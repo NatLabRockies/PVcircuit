@@ -85,19 +85,19 @@ def VMlist(mmax: int) -> List[str]:
 
 
 def sandia_T(poa_global: Union[float, np.ndarray, pd.Series], wind_speed: Union[float, np.ndarray, pd.Series], temp_air: Union[float, np.ndarray, pd.Series]) -> Union[float, np.ndarray, pd.Series]:
-    """
+    r"""
     Calculate the solar cell temperature using the Sandia model.
 
     Adapted from the pvlib library to avoid using pandas dataframes.
     Parameters used are those of 'open_rack_cell_polymerback'.
 
     Args:
-        poa_global (float): Plane of array irradiance [W/m²].
+        poa_global (float): Plane of array irradiance [W/m^2].
         wind_speed (float): Wind speed [m/s].
-        temp_air (float): Ambient air temperature [°C].
+        temp_air (float): Ambient air temperature [\degC].
 
     Returns:
-        float: Calculated cell temperature [°C].
+        float: Calculated cell temperature [\degC].
     """
     a = -3.56
     b = -0.075
@@ -121,6 +121,8 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
         model = devlist[i]
         if isinstance(model, pvc.Multi2T):  # Multi2T or current matched 2-junction tandem
             for ijunc in range(model.njuncs):
+                # Jscs is stored in mA/cm^2 (Meteo.add_currents); junction.Jext
+                # expects A/cm^2, so divide by 1000.
                 model.j[ijunc].set(Eg=Egs[i, ijunc], Jext=Jscs[i, ijunc] / 1e3, TC=TempCell.iloc[i])
 
             mpp_dict = model.MPP()
@@ -131,6 +133,7 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
         elif isinstance(model, pvc.Tandem3T):  # Tandem3T
             tandem_type = oper.split("-")
 
+            # Jscs in mA/cm^2 -> A/cm^2 for junction.Jext, same conversion as above.
             model.top.set(Eg=Egs[i, 0], sigma=sigmas[i, 0], Jext=Jscs[i, 0] / 1e3, TC=TempCell.iloc[i])
             model.bot.set(Eg=Egs[i, 1], sigma=sigmas[i, 1], Jext=Jscs[i, 1] / 1e3, TC=TempCell.iloc[i])
             if tandem_type[0] == "MPP":
@@ -201,7 +204,7 @@ class Meteo:
         # resolution-agnostic, so it works under both pandas 2.x ([ns])
         # and pandas 3.x ([us]).  Using `astype(np.int64)/1e9` would be
         # silently 1000x off under pandas >= 3.0.
-        self.energy_in = trapezoid(y=self.irradiance, x=(self.datetime - self.datetime[0]).total_seconds()) / 3600 / 1000  # Energy input [kWh/m²/yr]
+        self.energy_in = trapezoid(y=self.irradiance, x=(self.datetime - self.datetime[0]).total_seconds()) / 3600 / 1000  # Energy input [kWh/m^2/yr]
 
         self.average_photon_energy = None  # Will be calculated when running calc_ape
         self.jscs = None  # Short-circuit currents
@@ -235,8 +238,13 @@ class Meteo:
         """
         Add Jsc array to the instance.
 
+        Jsc values are stored in 'self.jscs' in **mA/cm^2** (the native unit
+        of :func:'pvcircuit.qe.JintMD').  They are converted to A/cm^2 inside
+        :func:'_calc_yield_async' before being assigned to
+        :attr:'pvcircuit.junction.Junction.Jext'.
+
         Args:
-            jsc (np.ndarray): Short-circuit current values to add.
+            jsc (np.ndarray): Short-circuit current values to add [mA/cm^2].
         """
         self._add_array(jsc, "jscs")
 
@@ -271,7 +279,7 @@ class Meteo:
             ValueError: If data array sizes are inconsistent with cell temperature.
 
         Returns:
-            Tuple[float, float]: A tuple containing energy yield [kWh/m²/yr] and energy harvesting efficiency.
+            Tuple[float, float]: A tuple containing energy yield [kWh/m^2/yr] and energy harvesting efficiency.
         """
         # If sigma values are not provided, initialize them to zero
         if self.sigmas is None:
@@ -337,11 +345,15 @@ class Meteo:
 
         power = results["Pmp"]  # output power [W]
 
-        power_density = power / model.totalarea  # W --> W/cm²
+        power_density = power / model.totalarea  # W --> W/cm^2
 
-        EnergyOut = trapezoid(power_density, (self.datetime - self.datetime[0]).total_seconds())  # [Ws/cm²/yr]
+        EnergyOut = trapezoid(power_density, (self.datetime - self.datetime[0]).total_seconds())  # [Ws/cm^2/yr]
 
-        EnergyOut = EnergyOut / 3.6e3 / 1e3 * 1e4  # [Ws/cm²/yr] --> [kWh/m²/yr]
+        # Unit conversion breakdown for the factor /3.6e3 /1e3 *1e4:
+        #   /3600  : seconds -> hours      (Ws -> Wh)
+        #   /1000  : W -> kW               (Wh -> kWh)
+        #   *1e4   : cm^-2 -> m^-2            (per-cm^2 -> per-m^2, since 1 m^2 = 1e4 cm^2)
+        EnergyOut = EnergyOut / 3.6e3 / 1e3 * 1e4  # [Ws/cm^2/yr] --> [kWh/m^2/yr]
 
         # Calculate energy harvesting efficiency
         EYeff = EnergyOut / self.energy_in

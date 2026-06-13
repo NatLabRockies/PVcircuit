@@ -3,13 +3,13 @@ import re
 from pathlib import Path
 
 import numpy as np
-
-# Set to True once to write baseline test files, then revert to False
-REGENERATE_TEST_FILES = False
 import pytest
 
 import pvcircuit as pvc
 from pvcircuit import IV3T, Multi2T, Tandem3T
+
+# Set to True once to write baseline test files, then revert to False
+REGENERATE_TEST_FILES = False
 
 
 @pytest.fixture
@@ -407,7 +407,7 @@ def test_LC_effect_on_voc3(dev3T):
 
     # |Vrz| (bottom-junction voltage at Izo=0) grows under LC
     assert abs(voc_lc.Vrz[0]) > abs(voc_base.Vrz[0])
-    # Isc3 is unchanged by LC by construction (V_top=0 → Jem=0)
+    # Isc3 is unchanged by LC by construction (V_top=0 -> Jem=0)
     np.testing.assert_almost_equal(isc_lc.Iro[0], isc_base.Iro[0], decimal=8)
     np.testing.assert_almost_equal(isc_lc.Ito[0], isc_base.Ito[0], decimal=8)
 

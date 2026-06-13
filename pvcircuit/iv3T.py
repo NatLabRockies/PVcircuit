@@ -73,9 +73,56 @@ CZ:A = RZ, B = TZ
 
 
 class IV3T(object):
-    """
-    operational state of 3T tandem
-    (Iro,Izo,Ito), (Vzt,Vrz,Vtr), etc
+    """Operational state of a 3-terminal tandem.
+
+    All array attributes have the same shape (set at construction). A scalar
+    shape of '0' produces 0-d arrays, '(N,)' produces line scans, and a
+    tuple such as '(N, M)' produces a 2-d operating grid.
+
+    Units and conventions
+    ---------------------
+    Device currents (absolute, **not** densities):
+        - 'Iro', 'Izo', 'Ito' -- currents flowing out of the R, Z, and T
+          terminals [A]. Kirchhoff requires 'Iro + Izo + Ito = 0'. Convert
+          to density with 'J = I / area'.
+
+    Device voltages (relative inter-terminal):
+        - 'Vzt', 'Vrz', 'Vtr' -- inter-terminal voltage differences [V]
+          (e.g. 'Vzt = V_z - V_t'). They are **not** absolute junction
+          voltages. By construction 'Vzt + Vrz + Vtr = 0'.
+
+    Load (instrument-frame) variables:
+        - 'VA', 'VB' -- load voltages [V] applied by sources A and B.
+        - 'IA', 'IB' -- load currents [A]. Negative => power extracted.
+
+    Mapping between device and load variables depends on 'meastype':
+
+        ====== ======== ======== ======== ========
+        meas.  VA       VB       IA       IB
+        ====== ======== ======== ======== ========
+        'CZ' 'Vrz'  '-Vzt' 'Iro'  'Ito'
+        'CR' '-Vrz' 'Vtr'  'Izo'  'Ito'
+        'CT' '-Vtr' 'Vzt'  'Iro'  'Izo'
+        'CF' '-Vfr' 'Vzf'  'Iro'  'Izo'
+        ====== ======== ======== ======== ========
+
+        See 'meas_dict' for the authoritative mapping.
+
+    Derived quantities:
+        - 'Ptot' -- total output power [W], computed as '-IA*VA - IB*VB'.
+          Positive values mean the device is delivering power. Undefined
+          points are encoded as the sentinel '-100.0' (see :func:'Pcalc').
+        - 'Ixhex'/'Iyhex', 'Vxhex'/'Vyhex' -- isometric hex-coordinate
+          projections of the (Iro, Izo, Ito) and (Vzt, Vrz, Vtr) triples,
+          used for hex-grid plots.
+
+    Other attributes:
+        - 'area' [cm^2] -- reference area used for I <-> J conversion.
+        - 'meastype' -- one of ''CZ'', ''CR'', ''CT'', ''CF''
+          (appending an extra character such as ''CZo'' swaps the A/B
+          load assignment for that measurement).
+        - 'shape' -- tuple describing the array dimensionality.
+        - 'names' -- per-point labels (flat list of length 'size').
     """
 
     arraykeys = ["Iro", "Izo", "Ito", "Vzt", "Vrz", "Vtr", "IA", "IB", "VA", "VB", "Ptot", "Ixhex", "Iyhex", "Vxhex", "Vyhex"]
@@ -573,6 +620,12 @@ class IV3T(object):
             return 2  # need all input values of same length
 
         self.Ptot = -self.IA * self.VA - self.IB * self.VB
+        # Replace NaN points with the sentinel value -100.0 so they fall below
+        # ``vmin=0`` in heat-map plots. Paired with the
+        # ``cmap.with_extremes(under='white')`` call in :meth:`plot`, this
+        # renders both undefined and physically-negative power points as
+        # white. Downstream code that needs to detect undefined points should
+        # compare with the sentinel directly rather than calling ``np.isnan``.
         np.nan_to_num(self.Ptot, copy=False, nan=-100.0)
 
         return 0
@@ -901,6 +954,9 @@ class IV3T(object):
                 ax.axvline(0, ls="--", color="gray", label="_vzero")
 
         if cmap:  # don't add image if cmap == None
+            # ``vmin=0`` on the imshow below means values < 0 are rendered with the
+            # "under" colour. That covers both physical negative power *and* the
+            # -100.0 sentinel that :meth:`Pcalc` writes in place of NaN.
             cmap = plt.get_cmap(cmap).with_extremes(under="white")  # white for Ptot < 0 and nan
             if xkey == self.xkey and ykey == self.ykey:
                 # image if evenly spaced

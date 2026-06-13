@@ -246,7 +246,7 @@ def test_LCcorr(example_eqe):
     # First-junction's corrected EQE is the raw value regardless of any etas
     raw_top_before = example_eqe.eqe[:, 0].copy()
 
-    # Set eta[1, 0] = 0.1 — couples top→bot
+    # Set eta[1, 0] = 0.1 -- couples top->bot
     example_eqe.LCcorr(junc=1, dist=0, val=0.1)
     np.testing.assert_array_almost_equal(example_eqe.corrEQE[:, 0], raw_top_before)
 
@@ -304,7 +304,7 @@ def test_EQE_add_eqe(example_eqe):
     assert example_eqe.eqe.shape[1] == n_before + 1
     assert example_eqe.sjuncs == sjuncs_before + ["extra_junc"]
 
-    # New column is the last one — outside [300, 1200] it must be zero-padded
+    # New column is the last one -- outside [300, 1200] it must be zero-padded
     new_col = example_eqe.eqe[:, -1]
     outside_mask = example_eqe.wavelength.flatten() > waves.max()
     if outside_mask.any():

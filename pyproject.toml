@@ -192,7 +192,7 @@ include = ["pvcircuit*"]
 [tool.setuptools.package-data]
 pvcircuit = ["data/*"]
 
-[tool.ruff]
+[tool.ruff.lint]
 # select = ["E", "W", "F"]  # Select categories of linting rules
 ignore = [
     "F401", # Ignore unused imports
