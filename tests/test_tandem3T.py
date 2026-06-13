@@ -325,22 +325,33 @@ def test_specialpoints(dev3T):
 
 
 def test_tandem3T_copy(dev3T):
-    """Tandem3T.copy() is a shallow copy: wrapper is new, top/bot junctions
-    are shared.  Wrapper-level attribute Rz is independent."""
+    """Tandem3T.copy() returns an independent device: top and bot are
+    duplicated via Junction.copy() so mutating either on the copy must
+    NOT propagate to the original.  Wrapper-level Rz is independent.
+    """
     d2 = dev3T.copy()
 
     assert d2 is not dev3T
-    # top/bot junctions are shared
-    assert d2.top is dev3T.top
-    assert d2.bot is dev3T.bot
+    # top/bot junctions are independent
+    assert d2.top is not dev3T.top
+    assert d2.bot is not dev3T.bot
+    np.testing.assert_almost_equal(d2.top.Eg, dev3T.top.Eg)
+    np.testing.assert_almost_equal(d2.bot.Eg, dev3T.bot.Eg)
 
     rz_before = dev3T.Rz
     d2.set(Rz=rz_before + 0.5)
     np.testing.assert_almost_equal(dev3T.Rz, rz_before)
     np.testing.assert_almost_equal(d2.Rz, rz_before + 0.5)
 
-    # Voc3 still works on the copy and returns the same triple
-    np.testing.assert_almost_equal(dev3T.Voc3().Vzt[0], d2.Voc3().Vzt[0])
+    # Mutating top junction on the copy does NOT affect the original
+    eg_top_before = dev3T.top.Eg
+    d2.top.set(Eg=eg_top_before + 0.1)
+    np.testing.assert_almost_equal(dev3T.top.Eg, eg_top_before)
+    np.testing.assert_almost_equal(d2.top.Eg, eg_top_before + 0.1)
+
+    # Voc3 still works on a freshly-copied device and returns the same triple
+    d3 = dev3T.copy()
+    np.testing.assert_almost_equal(dev3T.Voc3().Vzt[0], d3.Voc3().Vzt[0])
 
 
 def test_Rz_sensitivity(dev3T):

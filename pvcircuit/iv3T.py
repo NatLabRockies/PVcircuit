@@ -639,9 +639,13 @@ class IV3T(object):
             outlist = hexlist
             smatrix = oper
         elif oper == "hex2dev":
-            inlist = hexlist
-            outlist = devlist
-            smatrix = oper
+            # The hex -> dev inverse matrix is singular
+            # raise for now to prevent incorrect results from placeholder
+            raise NotImplementedError(
+                "convert(VorI, 'hex2dev', ...) is not implemented: the hex->dev "
+                "transformation matrix is singular and the placeholder in this "
+                "module would produce incorrect results."
+            )
         elif oper == "load2dev":
             inlist = loadlist
             outlist = devlist

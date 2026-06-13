@@ -28,7 +28,7 @@ Eg_DEFAULT = 1.1  # [eV]
 SIGMA_DEFAULT = 0  # [eV]
 TC_REF = 25.0  # [C]
 AREA_DEFAULT = 1.0  # [cm2] note: if A=1, then I->J
-BETA_DEFAUlT = 15.0  # unitless
+BETA_DEFAULT = 15.0  # unitless
 
 # numerical calculation parameters
 VLIM_REVERSE = 10.0
@@ -110,7 +110,7 @@ class Junction(object):
         JLC: float = 0.0,
         J0default: float = 10.0,
         pn: int = -1,
-        beta: float = BETA_DEFAUlT,
+        beta: float = BETA_DEFAULT,
         gamma: float = 0.0,
     ):
 
@@ -462,7 +462,10 @@ class Junction(object):
                 JRBB = Vdiode * self.Gsh * a * (1.0 + Vdiode / Vrb) ** (-mrb)
 
         elif method == "pvmismatch":
-            JRBB = np.float64(0.0)
+            raise NotImplementedError(
+                "RBB method 'pvmismatch' is documented but not implemented. "
+                "Use RBB='JFG', RBB='bishop', or RBB=None."
+            )
 
         # else:
         #     JRBB = self.J0.sum()

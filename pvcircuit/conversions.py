@@ -63,14 +63,19 @@ def photonenergy_to_wavelength(photonenergy: Union[float, np.ndarray]) -> Union[
 
 def normalize(eqe: pd.DataFrame) -> pd.DataFrame:
     """
-    Normalize the EQE data.
+    Normalize the EQE data to the range [0, 1].
 
     Args:
         eqe (pd.DataFrame): EQE data.
 
     Returns:
-        pd.DataFrame: Normalized EQE data.
+        pd.DataFrame: Normalized EQE data. If the input is constant
+        (max == min) the original input is returned unchanged to avoid
+        division by zero.
     """
     eqe_min = eqe.min().min()
     eqe_max = eqe.max().max()
-    return (eqe - eqe_min) / (eqe_max - eqe_min)
+    span = eqe_max - eqe_min
+    if span == 0:
+        return eqe - eqe_min  # all zeros, preserves shape and type
+    return (eqe - eqe_min) / span

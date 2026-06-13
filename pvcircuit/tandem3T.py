@@ -28,11 +28,17 @@ class Tandem3T(object):
 
     update_now = True
 
-    def __init__(self, name="Tandem3T", TC: float = junction.TC_REF, Rz: float = 1, Eg_list: List[float] = [1.8, 1.4], pn: List[float] = [-1, 1], Jext: float = 0.014):
+    def __init__(self, name="Tandem3T", TC: float = junction.TC_REF, Rz: float = 1, Eg_list: List[float] = None, pn: List[float] = None, Jext: float = 0.014):
         # user inputs
         # default s-type n-on-p
 
         # update_now = False #TODO remove
+
+        # Avoid mutable default args (PEP 8 footgun).
+        if Eg_list is None:
+            Eg_list = [1.8, 1.4]
+        if pn is None:
+            pn = [-1, 1]
 
         self.ui = None
         self.Vax = None
@@ -49,10 +55,18 @@ class Tandem3T(object):
 
     def copy(self):
         """
-        create a copy of a Tandem3T
-        need deepcopy() to separate lists, dicts, etc but crashes
+        Create an independent copy of this Tandem3T.
+
+        ``copy.deepcopy`` crashes on this class (legacy comment retained
+        from the original implementation), so we build the copy manually:
+        the wrapper is shallow-copied and the ``top`` and ``bot`` junctions
+        are duplicated via ``Junction.copy()`` so the returned device is
+        fully independent.
         """
-        return copy.copy(self)
+        tmp = copy.copy(self)
+        tmp.top = self.top.copy()
+        tmp.bot = self.bot.copy()
+        return tmp
 
     def __str__(self):
         """

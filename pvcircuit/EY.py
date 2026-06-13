@@ -40,27 +40,29 @@ def VMloss(model: Union["pvc.Tandem3T", "pvc.Multi2T"], oper: str, ncells: int) 
     if isinstance(model, pvc.Multi2T):  # Multi2T or current matched 2-junction tandem
         return 1
 
-    elif isinstance(model, pvc.Tandem3T):  # Tandem3T
-        tandem_type = oper.split("-")
+    if not isinstance(model, pvc.Tandem3T):
+        raise ValueError(f"Unknown model type: {type(model).__name__}")
 
-        if tandem_type[0] == "MPP" or tandem_type[0] == "CM":
-            return 1
-        elif tandem_type[0] == "VM":
-            if len(tandem_type) != 3:
-                raise ValueError("3T voltage matched operation must be VM-[bc/tc ratio]-[r/s-type], e.g. VM-21-r")
-            vm_ratio = tuple(map(int, tandem_type[1]))
+    # Tandem3T
+    tandem_type = oper.split("-")
 
-            if tandem_type[2] == "r":
-                endloss = max(vm_ratio) - 1
-            elif tandem_type[2] == "s":
-                endloss = sum(vm_ratio) - 1
-            else:
-                raise ValueError("Unknown model")
+    if tandem_type[0] in ("MPP", "CM"):
+        return 1
+    if tandem_type[0] != "VM":
+        raise ValueError(f"Unknown 3T operation mode: {oper!r}")
+
+    if len(tandem_type) != 3:
+        raise ValueError("3T voltage matched operation must be VM-[bc/tc ratio]-[r/s-type], e.g. VM-21-r")
+    vm_ratio = tuple(map(int, tandem_type[1]))
+
+    if tandem_type[2] == "r":
+        endloss = max(vm_ratio) - 1
+    elif tandem_type[2] == "s":
+        endloss = sum(vm_ratio) - 1
     else:
-        raise ValueError("Unknown model")
+        raise ValueError(f"Unknown VM polarity suffix {tandem_type[2]!r}; must be 'r' or 's'")
 
-    lossfactor = max(0, 1 - endloss / ncells)
-    return lossfactor
+    return max(0, 1 - endloss / ncells)
 
 
 # @lru_cache(maxsize=100)
@@ -194,7 +196,12 @@ class Meteo:
             sandia_T(self.irradiance.to_numpy(), self.wind.to_numpy(), self.temp.to_numpy()),
             index=self.datetime,
         )  # Cell temperature calculation
-        self.energy_in = trapezoid(y=self.irradiance, x=self.datetime.astype(np.int64)) / 1e9 / 3600 / 1000  # Energy input [kWh/m²/yr]
+        # Convert datetimes to float seconds since the first sample.
+        # `(datetime - datetime[0]).total_seconds()` is pandas-native and
+        # resolution-agnostic, so it works under both pandas 2.x ([ns])
+        # and pandas 3.x ([us]).  Using `astype(np.int64)/1e9` would be
+        # silently 1000x off under pandas >= 3.0.
+        self.energy_in = trapezoid(y=self.irradiance, x=(self.datetime - self.datetime[0]).total_seconds()) / 3600 / 1000  # Energy input [kWh/m²/yr]
 
         self.average_photon_energy = None  # Will be calculated when running calc_ape
         self.jscs = None  # Short-circuit currents
@@ -332,7 +339,7 @@ class Meteo:
 
         power_density = power / model.totalarea  # W --> W/cm²
 
-        EnergyOut = trapezoid(power_density, self.datetime.values.astype(np.int64)) / 1e9  # [Ws/cm²/yr]
+        EnergyOut = trapezoid(power_density, (self.datetime - self.datetime[0]).total_seconds())  # [Ws/cm²/yr]
 
         EnergyOut = EnergyOut / 3.6e3 / 1e3 * 1e4  # [Ws/cm²/yr] --> [kWh/m²/yr]
 

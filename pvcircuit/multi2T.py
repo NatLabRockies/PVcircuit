@@ -48,13 +48,19 @@ class Multi2T(object):
         Rs2T: float = 0.0,
         area: float = 1.0,
         Jext: float = 0.014,
-        Eg_list: list[float] = [1.8, 1.4],
-        n: list[int] = [1, 2],
+        Eg_list: list[float] = None,
+        n: list[int] = None,
         J0ratio: float = None,
         J0ref: float = None,
     ):
         # user inputs
         # note n and J0ratio much be same size
+
+        # Avoid mutable default args (PEP 8 footgun).
+        if Eg_list is None:
+            Eg_list = [1.8, 1.4]
+        if n is None:
+            n = [1, 2]
 
         self.Vpoints = None
         self.Ipoints = None
@@ -76,11 +82,18 @@ class Multi2T(object):
 
     def copy(self) -> Multi2T:
         """
-        create a copy of a Multi2T
-        need deepcopy() to separate lists, dicts, etc but crashes
-        """
+        Create an independent copy of this Multi2T.
 
-        return copy.copy(self)
+        ``copy.deepcopy`` crashes on this class, so we build the copy manually:
+        the wrapper is shallow-copied, but the contained junction list and
+        each junction inside it are duplicated via ``Junction.copy()``.
+        Mutating a junction on the returned object will therefore NOT
+        affect the original device.
+        """
+        tmp = copy.copy(self)
+        tmp.j = [junc.copy() for junc in self.j]
+        tmp.Vmid = self.Vmid.copy()
+        return tmp
 
     @classmethod
     def from_3T(cls, dev3T: object, copy_attributes: bool = True) -> Multi2T:

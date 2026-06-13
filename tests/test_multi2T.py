@@ -158,21 +158,28 @@ def test_4j():
 
 
 def test_multi2T_copy(dev2T):
-    """Multi2T.copy() returns a new wrapper, but is a SHALLOW copy
-    (per the source docstring: deepcopy crashes).  Therefore the
-    junction list and its elements are shared with the original.
-    Mutating the wrapper-level attribute Rs2T is independent; mutating
-    a junction inside the copy mutates the original too.
+    """Multi2T.copy() must return an independent object: the junction
+    list is duplicated and each junction inside it is itself a copy, so
+    mutating any junction in the copy must NOT affect the original.
+    Wrapper-level attribute Rs2T is independent too.
     """
     m2 = dev2T.copy()
 
     # wrapper objects are distinct
     assert m2 is not dev2T
 
-    # but the junction list and elements ARE shared (shallow copy)
-    assert m2.j is dev2T.j
-    assert m2.j[0] is dev2T.j[0]
-    assert m2.j[1] is dev2T.j[1]
+    # junction list and elements are independent (not aliases)
+    assert m2.j is not dev2T.j
+    assert m2.j[0] is not dev2T.j[0]
+    assert m2.j[1] is not dev2T.j[1]
+
+    # Vmid array is independent too
+    assert m2.Vmid is not dev2T.Vmid
+
+    # initial contents match
+    np.testing.assert_almost_equal(m2.Rs2T, dev2T.Rs2T)
+    np.testing.assert_almost_equal(m2.j[0].Eg, dev2T.j[0].Eg)
+    np.testing.assert_almost_equal(m2.j[1].Eg, dev2T.j[1].Eg)
 
     # wrapper-level attribute set via .set() is independent on the copy
     rs_before = dev2T.Rs2T
@@ -180,9 +187,16 @@ def test_multi2T_copy(dev2T):
     np.testing.assert_almost_equal(dev2T.Rs2T, rs_before)
     np.testing.assert_almost_equal(m2.Rs2T, rs_before + 1.0)
 
-    # MPP gives the same numerical result on both wrappers
+    # Mutating a junction on the copy must not affect the original
+    eg_before = dev2T.j[0].Eg
+    m2.j[0].set(Eg=eg_before + 0.1)
+    np.testing.assert_almost_equal(dev2T.j[0].Eg, eg_before)
+    np.testing.assert_almost_equal(m2.j[0].Eg, eg_before + 0.1)
+
+    # MPP gives the same numerical result on both wrappers (initial state)
+    m3 = dev2T.copy()
     mpp1 = dev2T.MPP()
-    mpp2 = m2.MPP()
+    mpp2 = m3.MPP()
     np.testing.assert_allclose(mpp1["Voc"], mpp2["Voc"])
     np.testing.assert_allclose(mpp1["Isc"], mpp2["Isc"])
 
