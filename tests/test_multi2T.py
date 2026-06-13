@@ -52,7 +52,9 @@ def test_2T_from_single_junction(junction):
 
     dev2T = Multi2T.from_single_junction(junction)
     params2T = dev2T.MPP(pnts=150)
-    pvlib_sd = pvsystem.singlediode(junction.Jext, junction.J0, junction.Rser, 1 / junction.Gsh, junction.n * junction.Vth)
+    # pvlib uses resistance_shunt; Gsh = 0 corresponds to Rsh = infinity (no shunt).
+    resistance_shunt = np.inf if junction.Gsh == 0 else 1 / junction.Gsh
+    pvlib_sd = pvsystem.singlediode(junction.Jext, junction.J0, junction.Rser, resistance_shunt, junction.n * junction.Vth)
 
     np.testing.assert_almost_equal(params2T["Pmp"], pvlib_sd.loc[0, "p_mp"], decimal=6)
     np.testing.assert_almost_equal(params2T["Imp"], pvlib_sd.loc[0, "i_mp"], decimal=5)

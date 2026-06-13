@@ -105,10 +105,12 @@ def _load_nsrdb_raw():
         with zf.open(fname) as f:
             data = pd.read_csv(f, header=2)
 
-    data["timestamp"] = pd.to_datetime(data[["Year", "Month", "Day", "Hour", "Minute"]], utc=True)
+    # Build the timestamp as a standalone Series and assign directly to the
+    # index, avoiding a column insert on this very wide DataFrame (which
+    # otherwise triggers a pandas PerformanceWarning about fragmentation).
     tz_offset = pytz.FixedOffset(int(meta["Local Time Zone"][0] * 60))
-    data["timestamp"] = data["timestamp"].dt.tz_convert(tz_offset)
-    data.set_index("timestamp", inplace=True)
+    timestamp = pd.to_datetime(data[["Year", "Month", "Day", "Hour", "Minute"]], utc=True).dt.tz_convert(tz_offset)
+    data.index = pd.DatetimeIndex(timestamp, name="timestamp")
 
     meteo_full = data.iloc[:, :32].copy()
     spectra_full = data.iloc[:, 32:].copy() / 1e3  # W/m²/µm → W/m²/nm

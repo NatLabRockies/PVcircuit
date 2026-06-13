@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.constants import constants
+from scipy import constants
 
 import pvcircuit as pvc
 from pvcircuit import conversions as convert
