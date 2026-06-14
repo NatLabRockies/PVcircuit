@@ -6,7 +6,7 @@ from typing import Union
 # Physical constants (see Conventions section in copilot-instructions.md for the
 # full unit catalogue used across PVcircuit).
 K_Q = constants.k / constants.e
-"""[V/K] Boltzmann constant divided by elementary charge. Used in :func:'Vth'
+"""[V/K] Boltzmann constant divided by elementary charge. Used in 'Vth'
 to compute the thermal voltage kT/q."""
 
 HC_E = constants.h * constants.c / constants.e
@@ -16,7 +16,7 @@ wavelength is supplied in nm; equivalently 'HC_E * 1e9' \approx 1239.84 eV*nm.""
 
 DB_PREFIX = 2.0 * np.pi * constants.e * (constants.k / constants.h) ** 3 / (constants.c) ** 2 / 1.0e4
 r"""[A/(cm^2*K^3)] Detailed-balance prefactor 2\pi*e*(k/h)^3/c^2 with the trailing
-'/1e4' converting m^2 -> cm^2. Used in :func:'pvcircuit.junction.Jdb' to compute
+'/1e4' converting m^2 -> cm^2. Used in 'Jdb' to compute
 the radiative saturation current density. Value \approx 1.0133e-8 A/(cm^2*K^3)."""
 
 

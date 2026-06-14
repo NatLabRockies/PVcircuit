@@ -27,7 +27,7 @@ from pvcircuit.conversions import DB_PREFIX, HC_E, K_Q, TK, Vth
 Eg_DEFAULT = 1.1  # [eV]
 SIGMA_DEFAULT = 0  # [eV]
 TC_REF = 25.0  # [C]
-AREA_DEFAULT = 1.0  # [cm2] note: if A=1, then I->J
+AREA_DEFAULT = 1.0  # [cm^2] note: if A=1, then I->J
 BETA_DEFAULT = 15.0  # unitless
 
 # numerical calculation parameters
@@ -180,15 +180,15 @@ class Junction(object):
 
         strout += "\nEg = {0:.2f} eV, TC = {1:.1f} C".format(self.Eg, self.TC)
 
-        strout += "\nJext = {0:.1f} mA/cm2, JLC = {1:.1f} mA/cm2".format(self.Jext * 1000.0, self.JLC * 1000.0)
+        strout += "\nJext = {0:.1f} mA/cm^2, JLC = {1:.1f} mA/cm^2".format(self.Jext * 1000.0, self.JLC * 1000.0)
 
-        strout += "\nGsh = {0:g} S/cm2, Rser = {1:g} Ωcm2".format(self.Gsh, self.Rser)
+        strout += "\nGsh = {0:g} S/cm^2, Rser = {1:g} Ohm*cm^2".format(self.Gsh, self.Rser)
 
-        strout += "\nlightA = {0:g} cm2, totalA = {1:g} cm2".format(self.lightarea, self.totalarea)
+        strout += "\nlightA = {0:g} cm^2, totalA = {1:g} cm^2".format(self.lightarea, self.totalarea)
 
         strout += "\npn = {0:d}, beta = {1:g}, gamma = {2:g}".format(self.pn, self.beta, self.gamma)
 
-        strout += "\n {0:^5s} {1:^10s} {2:^10s}".format("n", "J0ratio", "J0(A/cm2)")
+        strout += "\n {0:^5s} {1:^10s} {2:^10s}".format("n", "J0ratio", "J0(A/cm^2)")
         strout += "\n {0:^5s} {1:^10.0f} {2:^10.3e}".format("db", 1.0, self.Jdb)
 
         i = 0
@@ -332,6 +332,21 @@ class Junction(object):
             #     with self.debugout:
             #         print("no Junckey", key)
 
+        # Boundary-condition check: the photocurrent property scales as
+        # Jphoto = Jext * lightarea / totalarea + JLC, so lightarea must
+        # never exceed totalarea (no more than 100 % of the device is
+        # illuminated). Validate once after all kwargs are processed so
+        # multi-key sets like set(lightarea=X, totalarea=Y) are checked
+        # against their final state, not transient intermediates.
+        if any(k in kwargs for k in ("area", "lightarea", "totalarea")):
+            if self.lightarea > self.totalarea:
+                raise ValueError(
+                    f"Junction '{self.name}': lightarea ({self.lightarea}) "
+                    f"cannot exceed totalarea ({self.totalarea}). "
+                    "Jphoto = Jext * lightarea/totalarea assumes the "
+                    "illuminated fraction is at most 1."
+                )
+
     @property
     def Jphoto(self) -> float:
         """[A/cm^2] total photocurrent density on the junction.
@@ -350,7 +365,7 @@ class Junction(object):
 
     @property
     def TK(self) -> float:
-        """[K] junction temperature in Kelvin (derived from :attr:'TC')."""
+        """[K] junction temperature in Kelvin (derived from 'TC')."""
         return TK(self.TC)
 
     @property
@@ -362,9 +377,9 @@ class Junction(object):
     def Jdb(self) -> float:
         """[A/cm^2] radiative (detailed-balance) saturation current density.
 
-        Computed from :attr:'Eg', :attr:'sigma', and :attr:'TC' via the Rau et
+        Computed from 'Eg', 'sigma', and 'TC' via the Rau et
         al. formulation. This is a thermodynamic quantity (not a free
-        parameter) and forms the irreducible lower bound on :attr:'J0'.
+        parameter) and forms the irreducible lower bound on 'J0'.
         """
         return Jdb(self.TC, self.Eg, self.sigma)
 
@@ -372,15 +387,15 @@ class Junction(object):
     def J0(self) -> float:
         """[A/cm^2] per-diode saturation current densities '[J0(n0), J0(n1), ...]'.
 
-        Recomputed on every access from :attr:'Jdb', :attr:'n', and
-        :attr:'J0ratio' using the formula
+        Recomputed on every access from 'Jdb', 'n', and
+        'J0ratio' using the formula
 
             'J0[i] = (Jdb * J0scale)^(1/n[i]) * J0ratio[i] / J0scale'
 
         where 'J0scale = 1000' is an internal numerical-stability factor
-        (see the class-level comment on :attr:'J0scale'). Because
-        :attr:'Jdb' depends on temperature, :attr:'J0' automatically tracks
-        changes in :attr:'TC'.
+        (see the class-level comment on 'J0scale'). Because
+        'Jdb' depends on temperature, 'J0' automatically tracks
+        changes in 'TC'.
         """
 
         if (isinstance(self.n, np.ndarray)) and (isinstance(self.J0ratio, np.ndarray)):

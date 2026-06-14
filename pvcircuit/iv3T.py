@@ -111,13 +111,18 @@ class IV3T(object):
     Derived quantities:
         - 'Ptot' -- total output power [W], computed as '-IA*VA - IB*VB'.
           Positive values mean the device is delivering power. Undefined
-          points are encoded as the sentinel '-100.0' (see :func:'Pcalc').
+          points are encoded as the sentinel '-100.0' (see 'Pcalc').
         - 'Ixhex'/'Iyhex', 'Vxhex'/'Vyhex' -- isometric hex-coordinate
           projections of the (Iro, Izo, Ito) and (Vzt, Vrz, Vtr) triples,
           used for hex-grid plots.
 
     Other attributes:
-        - 'area' [cm^2] -- reference area used for I <-> J conversion.
+        - 'area' [cm^2] -- nominal device area. **Informational only**:
+          IV3T stores absolute currents and voltages, and none of the
+          coordinate or load conversions in this class read 'area'.
+          External callers (e.g. 'tandem3T.Tandem3T')
+          may use it to recover current densities via 'J = I / area',
+          but the value is not synchronised with any device.
         - 'meastype' -- one of ''CZ'', ''CR'', ''CT'', ''CF''
           (appending an extra character such as ''CZo'' swaps the A/B
           load assignment for that measurement).
@@ -151,7 +156,9 @@ class IV3T(object):
 
         self.name = name
         self.meastype = meastype
-        self.area = area  # area (cm2) used to calculate J <-> I/A
+        # Informational nominal area in cm^2; IV3T methods do not read it.
+        # See class docstring for details.
+        self.area = area
 
         # force shape to be tuple
         if np.ndim(shape) == 0:  # not iterable
@@ -622,7 +629,7 @@ class IV3T(object):
         self.Ptot = -self.IA * self.VA - self.IB * self.VB
         # Replace NaN points with the sentinel value -100.0 so they fall below
         # ``vmin=0`` in heat-map plots. Paired with the
-        # ``cmap.with_extremes(under='white')`` call in :meth:`plot`, this
+        # ``cmap.with_extremes(under='white')`` call in 'plot', this
         # renders both undefined and physically-negative power points as
         # white. Downstream code that needs to detect undefined points should
         # compare with the sentinel directly rather than calling ``np.isnan``.
@@ -755,7 +762,7 @@ class IV3T(object):
         VA(IA,IB) & VB(IA,IB) .......... VorI='I'
             or
         IA(VA,VB) & IB(VA,VB) .......... VorI='V'
-        Iscale converts current mA -> A or mA/cm2-> A
+        Iscale converts current mA -> A or mA/cm^2-> A
         """
 
         xkey = VorI + "A"
@@ -865,7 +872,7 @@ class IV3T(object):
         VorI = xkey[0]
         if VorI == "I":
             if density:
-                unit = " (mA/cm2)"
+                unit = " (mA/cm^2)"
                 scale = 1000.0 / self.area
             else:
                 unit = " (mA)"
@@ -879,7 +886,7 @@ class IV3T(object):
         z0 = zkey[0]
         if z0 == "P":
             if density:
-                zlab = "Power (mW/cm2)"
+                zlab = "Power (mW/cm^2)"
                 zscale = 1000.0 / self.area
             else:
                 zlab = "Power (mW)"
@@ -887,7 +894,7 @@ class IV3T(object):
             lstep = 5.0
         elif z0 == "I":
             if density:
-                zlab = zkey + " (mA/cm2)"
+                zlab = zkey + " (mA/cm^2)"
                 zscale = 1000.0 / self.area
             else:
                 zlab = zkey + " (mA)"
@@ -956,7 +963,7 @@ class IV3T(object):
         if cmap:  # don't add image if cmap == None
             # ``vmin=0`` on the imshow below means values < 0 are rendered with the
             # "under" colour. That covers both physical negative power *and* the
-            # -100.0 sentinel that :meth:`Pcalc` writes in place of NaN.
+            # -100.0 sentinel that 'Pcalc' writes in place of NaN.
             cmap = plt.get_cmap(cmap).with_extremes(under="white")  # white for Ptot < 0 and nan
             if xkey == self.xkey and ykey == self.ykey:
                 # image if evenly spaced

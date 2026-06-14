@@ -286,7 +286,7 @@ class PlotsWithControls:
 
             VoutBox.clear_output()
             if self.VdataMPP:
-                outstr = (fmtstr + ",   Pmp = {6:>5.2f} mW/cm2").format(
+                outstr = (fmtstr + ",   Pmp = {6:>5.2f} mW/cm^2").format(
                     self.VdataMPP.Vzt[0],
                     self.VdataMPP.Vrz[0],
                     self.VdataMPP.Vtr[0],
@@ -299,7 +299,7 @@ class PlotsWithControls:
                     print(outstr.replace("Fit:", "VData:"))
 
             elif self.IdataMPP:
-                outstr = (fmtstr + ",   Pmp = {6:>5.2f} mW/cm2").format(
+                outstr = (fmtstr + ",   Pmp = {6:>5.2f} mW/cm^2").format(
                     self.IdataMPP.Vzt[0],
                     self.IdataMPP.Vrz[0],
                     self.IdataMPP.Vtr[0],
@@ -313,7 +313,7 @@ class PlotsWithControls:
 
             if "MPP" in fitsp.names:  # not fast
                 ii = fitsp.names.index("MPP")  # index of MPP from sp
-                fmtstr += ",   Pmp = {6:>5.2f} mW/cm2"
+                fmtstr += ",   Pmp = {6:>5.2f} mW/cm^2"
                 outstr = fmtstr.format(
                     fitsp.Vzt[0],
                     fitsp.Vrz[0],
@@ -775,7 +775,7 @@ class PlotsWithControls:
                 stext = (specname + " {0:6.2f} W/m2").format(OP)
                 print("Eg = ", Egs, " eV")
                 print(stext)
-                print("Jsc = ", Jscs[0], " mA/cm2")
+                print("Jsc = ", Jscs[0], " mA/cm^2")
 
             te = time()
             dt = te - ts
@@ -1018,10 +1018,10 @@ class PlotsWithControls:
 
                 if False:
                     Jext_list = class_to_plot.proplist("Jext")  # remember list external photocurrents
-                    snote = "T = {0:.1f} C, Rs2T = {1:g} Ω cm2, A = {2:g} cm2".format(class_to_plot.TC, class_to_plot.Rs2T, class_to_plot.lightarea)
+                    snote = "T = {0:.1f} C, Rs2T = {1:g} Ohm*cm^2, A = {2:g} cm^2".format(class_to_plot.TC, class_to_plot.Rs2T, class_to_plot.lightarea)
                     snote += "\nEg = " + str(Eg_list) + " eV"
-                    snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm2"
-                    snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(Voc, MPP["Isc"] * 1000, MPP["FF"] * 100, MPP["Pmp"] * 1000)
+                    snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm^2"
+                    snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm^2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(Voc, MPP["Isc"] * 1000, MPP["FF"] * 100, MPP["Pmp"] * 1000)
                     kids = lax.get_children()
                     for kid in kids:
                         if kid.get_label() == "mpptext":
@@ -1322,10 +1322,10 @@ class PlotsWithControls:
 
             if False:
                 # annotate
-                snote = "T = {0:.1f} C, Rs2T = {1:g} Ω cm2, A = {2:g} cm2".format(class_to_plot.TC, class_to_plot.Rs2T, class_to_plot.lightarea)
+                snote = "T = {0:.1f} C, Rs2T = {1:g} Ohm*cm^2, A = {2:g} cm^2".format(class_to_plot.TC, class_to_plot.Rs2T, class_to_plot.lightarea)
                 snote += "\nEg = " + str(Eg_list) + " eV"
-                snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm2"
-                snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(Voc, MPP["Isc"] * 1000, MPP["FF"] * 100, MPP["Pmp"] * 1000)
+                snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm^2"
+                snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm^2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(Voc, MPP["Isc"] * 1000, MPP["FF"] * 100, MPP["Pmp"] * 1000)
 
                 # lax.text(Vmin+0.1,Imax/2,snote,zorder=5,bbox=dict(facecolor='white'))
                 lax.text(

@@ -1,10 +1,10 @@
 junc: <pvcircuit.junction.Junction class>
 Eg = 1.10 eV, TC = 25.0 C
-Jext = 40.0 mA/cm2, JLC = 0.0 mA/cm2
-Gsh = 0 S/cm2, Rser = 0 Ωcm2
-lightA = 1 cm2, totalA = 1 cm2
+Jext = 40.0 mA/cm^2, JLC = 0.0 mA/cm^2
+Gsh = 0 S/cm^2, Rser = 0 Ohm*cm^2
+lightA = 1 cm^2, totalA = 1 cm^2
 pn = -1, beta = 15, gamma = 0
-   n    J0ratio   J0(A/cm2) 
+   n    J0ratio   J0(A/cm^2)
   db       1      1.314e-16 
  1.00    10.00    1.314e-15 
  2.00    10.00    3.625e-09 
