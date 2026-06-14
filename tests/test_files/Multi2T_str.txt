@@ -1,24 +1,24 @@
 Multi2T: <pvcircuit.multi2T.Multi2T class>
-T = 25.0 C, Rs2T= 0 Ω cm2
+T = 25.0 C, Rs2T= 0 Ohm*cm^2
 
 j[0]: <pvcircuit.junction.Junction class>
 Eg = 1.80 eV, TC = 25.0 C
-Jext = 14.0 mA/cm2, JLC = 0.0 mA/cm2
-Gsh = 0 S/cm2, Rser = 0 Ωcm2
-lightA = 1 cm2, totalA = 1 cm2
+Jext = 14.0 mA/cm^2, JLC = 0.0 mA/cm^2
+Gsh = 0 S/cm^2, Rser = 0 Ohm*cm^2
+lightA = 1 cm^2, totalA = 1 cm^2
 pn = -1, beta = 0, gamma = 0
-   n    J0ratio   J0(A/cm2) 
+   n    J0ratio   J0(A/cm^2)
   db       1      5.082e-28 
  1.00    10.00    5.082e-27 
  2.00    10.00    7.129e-15 
 
 j[1]: <pvcircuit.junction.Junction class>
 Eg = 1.40 eV, TC = 25.0 C
-Jext = 14.0 mA/cm2, JLC = 0.0 mA/cm2
-Gsh = 0 S/cm2, Rser = 0 Ωcm2
-lightA = 1 cm2, totalA = 1 cm2
+Jext = 14.0 mA/cm^2, JLC = 0.0 mA/cm^2
+Gsh = 0 S/cm^2, Rser = 0 Ohm*cm^2
+lightA = 1 cm^2, totalA = 1 cm^2
 pn = -1, beta = 15, gamma = 0
-   n    J0ratio   J0(A/cm2) 
+   n    J0ratio   J0(A/cm^2)
   db       1      1.789e-21 
  1.00    10.00    1.789e-20 
  2.00    10.00    1.338e-11 

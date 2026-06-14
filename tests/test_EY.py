@@ -258,7 +258,7 @@ def test_get_eqe_at_temperature_bandgap_consistency(tc_eqet):
     # find the column index of the 25 \degC measurement
     idx_25 = np.where(tc_eqet.temperature == 25)[0]
     if len(idx_25) == 0:
-        pytest.skip("No 25 °C column in top-cell EQET data")
+        pytest.skip("No 25 degC column in top-cell EQET data")
 
     # measured bandgap at 25 \degC (first junction)
     tc_25_meas = EQET(

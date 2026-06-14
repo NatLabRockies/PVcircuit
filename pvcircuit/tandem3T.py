@@ -78,7 +78,7 @@ class Tandem3T(object):
         # print(attr_list)
 
         strout = self.name + ": <pvcircuit.tandem3T.Tandem3T class>"
-        strout += "\nT = {0:.1f} C, Rz= {1:g} Ω cm2, Rt= {2:g} Ω cm2, Rr = {3:g} Ω cm2".format(self.TC, self.Rz, self.top.Rser, self.bot.Rser)
+        strout += "\nT = {0:.1f} C, Rz= {1:g} Ohm*cm^2, Rt= {2:g} Ohm*cm^2, Rr = {3:g} Ohm*cm^2".format(self.TC, self.Rz, self.top.Rser, self.bot.Rser)
         strout += "\n\n" + str(self.top)
         strout += "\n\n" + str(self.bot)
         return strout
@@ -332,10 +332,15 @@ class Tandem3T(object):
             else:
                 Jz = Vz / self.Rz  # determine from Rz
 
-            # output (Jro,Jzo,Jto) mapped -> iv3T.(Iro,Izo,Ito)
-            iv3T.Iro.flat[i] = Jr
-            iv3T.Izo.flat[i] = Jz
-            iv3T.Ito.flat[i] = Jt
+            # Store ABSOLUTE currents [A] in iv3T.(Iro, Izo, Ito), honouring
+            # the IV3T contract (Idevlist is in Amps). The bottom-terminal
+            # current is the bottom-junction density times bot.totalarea; the
+            # mid-contact current uses the device totalarea (= max(top, bot));
+            # the top-terminal current uses top.totalarea. Equal-area devices
+            # are unaffected because totalarea collapses to a single value.
+            iv3T.Iro.flat[i] = Jr * bot.totalarea
+            iv3T.Izo.flat[i] = Jz * self.totalarea
+            iv3T.Ito.flat[i] = Jt * top.totalarea
             # i += 1
 
         return 0
@@ -346,24 +351,23 @@ class Tandem3T(object):
         function solved for dI(Vz)=0 in I3rel
         input Vzt, Vrz, temp3T <IV3T class> container for calculation
         """
-        top = self.top  # top Junction
-        bot = self.bot  # bot Junction
+        # Kept local references to the junctions for parity with the previous
+        # implementation, even though _dI now reads absolute currents directly.
+        _ = self.top
+        _ = self.bot
 
         Vt = Vz - Vzt
         Vr = Vrz + Vz
 
         temp3T.set(Vzt=Vz, Vrz=Vr, Vtr=Vt)
 
-        self.J3Tabs(temp3T)  # calcuate (Jro,Jzo,Jto) from (Vz,Vr,Vt)
+        self.J3Tabs(temp3T)  # populates temp3T.(Iro, Izo, Ito) in ABSOLUTE Amps
 
-        # (Jro,Jzo,Jto)  -> (Iro,Izo,Ito)
-        Jro = temp3T.Iro[0]
-        Jzo = temp3T.Izo[0]
-        Jto = temp3T.Ito[0]
-
-        Iro = Jro * bot.totalarea
-        Izo = Jzo * self.totalarea
-        Ito = Jto * top.totalarea
+        # J3Tabs now honours the IV3T absolute-current contract, so no
+        # per-junction-area multiplication is needed here.
+        Iro = temp3T.Iro[0]
+        Izo = temp3T.Izo[0]
+        Ito = temp3T.Ito[0]
 
         return Iro + Izo + Ito
 
@@ -412,9 +416,13 @@ class Tandem3T(object):
             temp3T.set(Vzt=Vz, Vrz=Vr, Vtr=Vt)
             self.J3Tabs(temp3T)
 
-            Jro = temp3T.Iro[0]
-            Jzo = temp3T.Izo[0]
-            Jto = temp3T.Ito[0]
+            # J3Tabs writes ABSOLUTE currents [A] to temp3T.(Iro,Izo,Ito);
+            # convert back to current density [A/cm^2] for the Rz [Ohm*cm^2]
+            # voltage drop calculation. The output assignment at the bottom
+            # of this loop multiplies by area to recover absolute currents.
+            Jro = temp3T.Iro[0] / bot.totalarea
+            Jzo = temp3T.Izo[0] / self.totalarea
+            Jto = temp3T.Ito[0] / top.totalarea
             Vzmax = Jzo * Rz
 
             # reset resistance
@@ -465,19 +473,27 @@ class Tandem3T(object):
                     )
                     # dI0 = self._dI(Vz,Vzt,Vrz,temp3T)
 
-                    Jro = temp3T.Iro[0]
-                    Jzo = temp3T.Izo[0]
-                    Jto = temp3T.Ito[0]
+                    # temp3T.(Iro,Izo,Ito) hold absolute currents [A] after
+                    # the brentq's final _dI -> J3Tabs evaluation.
+                    Iro_abs = temp3T.Iro[0]
+                    Izo_abs = temp3T.Izo[0]
+                    Ito_abs = temp3T.Ito[0]
 
                 except ValueError:
-                    Jro = np.nan
-                    Jzo = np.nan
-                    Jto = np.nan
+                    Iro_abs = np.nan
+                    Izo_abs = np.nan
+                    Ito_abs = np.nan
+            else:
+                # Rz == 0 path: use the absolute currents already obtained
+                # from the initial J3Tabs call above (Vz = 0).
+                Iro_abs = Jro * bot.totalarea
+                Izo_abs = Jzo * self.totalarea
+                Ito_abs = Jto * top.totalarea
 
             # output
-            iv3T.Iro.flat[i] = Jro * bot.totalarea
-            iv3T.Izo.flat[i] = Jzo * self.totalarea
-            iv3T.Ito.flat[i] = Jto * top.totalarea
+            iv3T.Iro.flat[i] = Iro_abs
+            iv3T.Izo.flat[i] = Izo_abs
+            iv3T.Ito.flat[i] = Ito_abs
             # i += 1
 
         iv3T.kirchhoff(["Vzt", "Vrz"])  # Vtr not used so make sure consistent
@@ -744,6 +760,49 @@ class Tandem3T(object):
             print("MPP: {0:d}pnts , {1:2.4f} s".format(pnts, dt))
 
         return pt
+
+    def efficiency(self, Pspec="global", xspec=None):
+        """Power-conversion efficiency under a reference spectrum.
+
+        For a 3T device 'MPP' returns an 'IV3T' point whose
+        absolute power is 'pt.Ptot[0]' [W]. Efficiency normalises that
+        power by the incident power on the device footprint
+        ('self.totalarea = max(top.totalarea, bot.totalarea)'), matching
+        the convention used in 'EY.Meteo' and
+        'Multi2T.efficiency'.
+
+        Parameters
+        ----------
+        Pspec : str or array-like, optional
+            Reference spectrum. Either an ASTM key recognised by
+            'PintMD' (''space'', ''global'',
+            ''direct'') or a spectral irradiance array [W/m^2/nm].
+            Default ''global'' (AM1.5G, ~1000 W/m^2 \\approx 0.1 W/cm^2).
+        xspec : array-like, optional
+            Wavelength grid [nm] for *Pspec*. Defaults to the ASTM
+            reference grid (pvcircuit.qe.wvl).
+
+        Returns
+        -------
+        eff : float
+            Dimensionless efficiency (Ptot / (Pin * totalarea)). Returns
+            'np.nan' if the MPP solver could not converge.
+        """
+        # Lazy import to avoid a circular dependency: pvcircuit.__init__
+        # imports tandem3T before qe.
+        from pvcircuit import qe
+
+        if xspec is None:
+            Pin_Wm2 = qe.PintMD(Pspec)
+        else:
+            Pin_Wm2 = qe.PintMD(Pspec, xspec)
+        Pin = np.asarray(Pin_Wm2, dtype=np.float64) / 1e4  # W/m^2 -> W/cm^2
+
+        pt = self.MPP()
+        Ptot = float(pt.Ptot[0])
+        if not math.isfinite(Ptot):
+            return np.nan
+        return float(Ptot / (Pin * self.totalarea))
 
     def VI0(self, VIname, meastype="CZ"):
         """
@@ -1026,7 +1085,7 @@ class Tandem3T(object):
 
     #         VoutBox.clear_output()
     #         if VdataMPP:
-    #             outstr = (fmtstr + ",   Pmp = {6:>5.2f} mW/cm2").format(
+    #             outstr = (fmtstr + ",   Pmp = {6:>5.2f} mW/cm^2").format(
     #                 VdataMPP.Vzt[0],
     #                 VdataMPP.Vrz[0],
     #                 VdataMPP.Vtr[0],
@@ -1039,7 +1098,7 @@ class Tandem3T(object):
     #                 print(outstr.replace("Fit:", "VData:"))
 
     #         elif IdataMPP:
-    #             outstr = (fmtstr + ",   Pmp = {6:>5.2f} mW/cm2").format(
+    #             outstr = (fmtstr + ",   Pmp = {6:>5.2f} mW/cm^2").format(
     #                 IdataMPP.Vzt[0],
     #                 IdataMPP.Vrz[0],
     #                 IdataMPP.Vtr[0],
@@ -1053,7 +1112,7 @@ class Tandem3T(object):
 
     #         if "MPP" in fitsp.names:  # not fast
     #             ii = fitsp.names.index("MPP")  # index of MPP from sp
-    #             fmtstr += ",   Pmp = {6:>5.2f} mW/cm2"
+    #             fmtstr += ",   Pmp = {6:>5.2f} mW/cm^2"
     #             outstr = fmtstr.format(
     #                 fitsp.Vzt[0],
     #                 fitsp.Vrz[0],

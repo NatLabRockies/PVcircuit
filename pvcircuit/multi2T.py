@@ -106,10 +106,18 @@ class Multi2T(object):
         bot = dev3T.bot
 
         dev2T = cls(name=dev3T.name, TC=dev3T.TC, Eg_list=[top.Eg, bot.Eg])
-        # Rs2T [\Omega*cm^2] = area-weighted average of the two Rser values
-        # (each Rser is itself in \Omega*cm^2, so the formula has dimensions of
-        # \Omega*cm^2 * cm^2 / cm^2 -> \Omega*cm^2).
-        dev2T.set(Rs2T=(top.Rser * top.totalarea + bot.Rser * bot.totalarea) / dev3T.totalarea)
+        # Rs2T [Omega*cm^2] for a series stack with possibly unequal junction areas.
+        # Each Rser_i is itself area-normalised (Omega*cm^2), so the absolute
+        # series resistance contributed by junction i is Rser_i / A_i (Omega).
+        # V2T(I) later consumes Rs2T as Rs2T * I / A_ref, so the correct
+        # area-normalised stack value is sum_i (Rser_i * A_ref / A_i) with
+        # A_ref = device.totalarea = max_i(A_i). For equal areas this collapses
+        # to Rser_top + Rser_bot.
+        A_ref = max(top.totalarea, bot.totalarea)
+        dev2T.set(
+            Rs2T=top.Rser * A_ref / top.totalarea
+            + bot.Rser * A_ref / bot.totalarea
+        )
 
         if copy_attributes:
             dev2T.j[0] = dev3T.top.copy()  # disconnected
@@ -146,10 +154,18 @@ class Multi2T(object):
 
         self.njuncs += 1
         self.Vmid = np.append(self.Vmid, np.nan)  # add new subcell voltage
-        # Keep Rs2T in \Omega*cm^2: parallel-combine the area-normalised resistances
-        # (Rs2T/totalarea, Rser/totalarea), then re-normalise by the smaller area.
-        self.set(Rs2T=(self.Rs2T / self.totalarea + junc.Rser / junc.totalarea) * np.min([self.totalarea, junc.totalarea]))  # update Rs2T
-        
+        # Keep Rs2T in Omega*cm^2 with the same convention as Multi2T.from_3T.
+        # The previous Rs2T was normalised by the old device totalarea, so its
+        # absolute series resistance is Rs2T / self.totalarea (Omega). Adding
+        # the new junction's contribution Rser / junc.totalarea (Omega) gives
+        # the new absolute resistance; we then re-normalise by the post-append
+        # device totalarea A_ref = max(self.totalarea, junc.totalarea) so
+        # V2T(I) = ... + Rs2T * I / A_ref returns the correct voltage drop.
+        A_ref = max(self.totalarea, junc.totalarea)
+        self.set(
+            Rs2T=(self.Rs2T / self.totalarea + junc.Rser / junc.totalarea) * A_ref
+        )
+
         if copy_attributes:
             self.j.append(junc.copy())  # disconnected
         else:
@@ -162,7 +178,7 @@ class Multi2T(object):
 
         strout = self.name + ": <pvcircuit.multi2T.Multi2T class>"
 
-        strout += "\nT = {0:.1f} C, Rs2T= {1:g} Ω cm2".format(self.TC, self.Rs2T)
+        strout += "\nT = {0:.1f} C, Rs2T= {1:g} Ohm*cm^2".format(self.TC, self.Rs2T)
 
         for i in range(self.njuncs):
             strout += "\n\n" + str(self.j[i])
@@ -414,7 +430,7 @@ class Multi2T(object):
                 ax.axvline(0, color="gray")
                 ax.set_title(self.name + " MPP")
                 ax.set_xlabel("Voltage (V)")
-                ax.set_ylabel("Current Density (A/cm2)")
+                ax.set_ylabel("Current Density (A/cm^2)")
                 axr = ax.twinx()
                 axr.set_ylabel("Power (W)", c="cyan")
 
@@ -442,7 +458,22 @@ class Multi2T(object):
                 ax.plot(self.Vpoints, self.Ipoints, marker="x", ls="", ms=12, c="black")  # special points
                 axr.plot(Vmp, Pmp, marker="o", fillstyle="none", ms=12, c="black")
 
-        mpp_dict = {"Voc": Voc, "Isc": Isc, "Vmp": Vmp, "Imp": Imp, "Pmp": Pmp, "FF": FF}
+        # Pmp_density [W/cm^2] uses the device reference area (max junction
+        # totalarea), matching how Rs2T is normalised and how EY.Meteo
+        # reports power_density. Multiply by an irradiance W/cm^2 (e.g.
+        # 0.1 for 1 sun AM1.5G) to obtain efficiency; or call
+        # Multi2T.efficiency() which integrates a reference spectrum.
+        Pmp_density = Pmp / self.totalarea if np.isfinite(Pmp) else np.nan
+
+        mpp_dict = {
+            "Voc": Voc,
+            "Isc": Isc,
+            "Vmp": Vmp,
+            "Imp": Imp,
+            "Pmp": Pmp,
+            "Pmp_density": Pmp_density,
+            "FF": FF,
+        }
 
         te = time()
         ds = te - ts
@@ -450,6 +481,45 @@ class Multi2T(object):
             print(f"MPP {ds:2.4f} s")
 
         return mpp_dict
+
+    def efficiency(self, Pspec="global", xspec=None):
+        """Power-conversion efficiency under a reference spectrum.
+
+        Pmp is divided by the incident power that strikes the device
+        footprint (device totalarea = max junction totalarea), which
+        matches the convention used in 'EY.Meteo'.
+
+        Parameters
+        ----------
+        Pspec : str or array-like, optional
+            Reference spectrum. Either an ASTM key recognised by
+            'PintMD' (''space'', ''global'',
+            ''direct'') or a spectral irradiance array [W/m^2/nm].
+            Default ''global'' (AM1.5G, ~1000 W/m^2 \approx 0.1 W/cm^2).
+        xspec : array-like, optional
+            Wavelength grid [nm] for *Pspec*. Defaults to the ASTM
+            reference grid (pvcircuit.qe.wvl).
+
+        Returns
+        -------
+        eff : float
+            Dimensionless efficiency (Pmp / (Pin * totalarea)). Returns
+            'np.nan' if the MPP solver returned NaN (e.g. dark device).
+        """
+        # Lazy import to avoid a circular dependency: pvcircuit.__init__
+        # imports multi2T before qe.
+        from pvcircuit import qe
+
+        if xspec is None:
+            Pin_Wm2 = qe.PintMD(Pspec)
+        else:
+            Pin_Wm2 = qe.PintMD(Pspec, xspec)
+        Pin = np.asarray(Pin_Wm2, dtype=np.float64) / 1e4  # W/m^2 -> W/cm^2
+
+        Pmp = self.MPP()["Pmp"]
+        if not np.isfinite(Pmp):
+            return np.nan
+        return float(Pmp / (Pin * self.totalarea))
 
     # def controls(self):
     #     """
@@ -512,7 +582,10 @@ class Multi2T(object):
     #             MPP["Pmp"] * scale,
     #             MPP["Vmp"],
     #             MPP["Imp"] * scale,
-    #             (MPP["Pmp"] * scale / self.lightarea),
+    #             # Efficiency reference area is the device totalarea (see
+    #             # Multi2T.efficiency); the previous self.lightarea divisor
+    #             # was inconsistent with the project-wide convention.
+    #             (MPP["Pmp"] * scale / self.totalarea),
     #         )
 
     #         # out_Voc.value = ('{0:>7.3f} V'.format(MPP['Voc']))
@@ -577,10 +650,10 @@ class Multi2T(object):
 
     #             if False:
     #                 Jext_list = self.proplist("Jext")  # remember list external photocurrents
-    #                 snote = "T = {0:.1f} C, Rs2T = {1:g} \Omega cm2, A = {2:g} cm2".format(self.TC, self.Rs2T, self.lightarea)
+    #                 snote = "T = {0:.1f} C, Rs2T = {1:g} \Omega cm^2, A = {2:g} cm^2".format(self.TC, self.Rs2T, self.lightarea)
     #                 snote += "\nEg = " + str(Eg_list) + " eV"
-    #                 snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm2"
-    #                 snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(
+    #                 snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm^2"
+    #                 snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm^2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(
     #                     Voc, MPP["Isc"] * 1000, MPP["FF"] * 100, MPP["Pmp"] * 1000
     #                 )
     #                 kids = lax.get_children()
@@ -881,10 +954,10 @@ class Multi2T(object):
 
     #         if False:
     #             # annotate
-    #             snote = "T = {0:.1f} C, Rs2T = {1:g} \Omega cm2, A = {2:g} cm2".format(self.TC, self.Rs2T, self.lightarea)
+    #             snote = "T = {0:.1f} C, Rs2T = {1:g} \Omega cm^2, A = {2:g} cm^2".format(self.TC, self.Rs2T, self.lightarea)
     #             snote += "\nEg = " + str(Eg_list) + " eV"
-    #             snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm2"
-    #             snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(
+    #             snote += "\nJext = " + str(Jext_list * 1000) + " mA/cm^2"
+    #             snote += "\nVoc = {0:.3f} V, Isc = {1:.2f} mA/cm^2\nFF = {2:.1f}%, Pmp = {3:.1f} mW".format(
     #                 Voc, MPP["Isc"] * 1000, MPP["FF"] * 100, MPP["Pmp"] * 1000
     #             )
 

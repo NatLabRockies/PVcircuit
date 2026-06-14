@@ -239,9 +239,9 @@ class Meteo:
         Add Jsc array to the instance.
 
         Jsc values are stored in 'self.jscs' in **mA/cm^2** (the native unit
-        of :func:'pvcircuit.qe.JintMD').  They are converted to A/cm^2 inside
-        :func:'_calc_yield_async' before being assigned to
-        :attr:'pvcircuit.junction.Junction.Jext'.
+        of 'JintMD').  They are converted to A/cm^2 inside
+        '_calc_yield_async' before being assigned to
+        'Junction.Jext'.
 
         Args:
             jsc (np.ndarray): Short-circuit current values to add [mA/cm^2].
@@ -345,6 +345,11 @@ class Meteo:
 
         power = results["Pmp"]  # output power [W]
 
+        # Normalise by device.totalarea (= max junction totalarea). This is
+        # the project-wide reference area for power normalisation: it matches
+        # how Multi2T.Rs2T is consumed in V2T and what Multi2T.efficiency()
+        # and Tandem3T.efficiency() use, so kWh/m^2/yr corresponds to the
+        # device footprint a system installer would see.
         power_density = power / model.totalarea  # W --> W/cm^2
 
         EnergyOut = trapezoid(power_density, (self.datetime - self.datetime[0]).total_seconds())  # [Ws/cm^2/yr]

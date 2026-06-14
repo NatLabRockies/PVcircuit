@@ -54,7 +54,7 @@ nm2eV = constants.h * constants.c / constants.e * 1e9  # [eV*nm] \approx 1239.84
 #   1/100 : 1/m -> 1/cm        (first /100)
 #   1/100 : 1/m -> 1/cm        (second /100)
 #   1/nm2eV: nm -> eV (so photon energy in eV cancels with EQE per-photon)
-JCONST = 1000 / 100 / 100 / nm2eV  # mA/cm2
+JCONST = 1000 / 100 / 100 / nm2eV  # mA/cm^2
 DBWVL_PREFIX = 2.0 * np.pi * constants.c * constants.e / 100 / 100  # [A/cm^2] wavelength-domain Jdb prefactor
 
 
@@ -173,7 +173,7 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
     if EQE is None -> calculate Power in [W/m2]
         total power=int(Pspec) over xEQE range
     else             -> caluculate J = spectra * lambda * EQE(lambda)
-        Jsc = int(Pspec*QE[0]*lambda) in [mA/cm2]
+        Jsc = int(Pspec*QE[0]*lambda) in [mA/cm^2]
         EQE optionally scalar for constant over xEQE range
         integrate over full spectrum is xEQE is None
 
@@ -188,10 +188,10 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
 
     .. note::
         **Return unit**: when 'EQE' is supplied the result is the
-        short-circuit current density in **mA/cm^2** (via :data:'JCONST').
-        :class:'pvcircuit.junction.Junction' stores 'Jext' in **A/cm^2**,
+        short-circuit current density in **mA/cm^2** (via 'JCONST').
+        'Junction' stores 'Jext' in **A/cm^2**,
         so callers that feed this into the junction model must divide by
-        '1000' first (see :class:'pvcircuit.EY.Meteo' for an example).
+        '1000' first (see 'EY.Meteo' for an example).
     """
 
     # check spectra input
@@ -302,7 +302,7 @@ def JdbFromEg(TC: float, Eg: float, dbsides: float = 1.0, method: Union[str, Non
     assuming a square EQE
     Eg[=]eV
     TK[=]K
-    returns Jdb[=]A/cm2
+    returns Jdb[=]A/cm^2
 
     optional parameters
     method: 'gamma'
@@ -492,7 +492,7 @@ class EQE(object):
         self.LCcorr()  # calculate LC with zero etas
 
     def calc_Eg_Rau(self, return_sigma: bool = True, fit_gaussian: bool = True, plot_fits: bool = False) -> Tuple[List[float], List[float]]:
-        # using U. Rau, B. Blank, T. C. M. Müller, and T. Kirchartz
+        # using U. Rau, B. Blank, T. C. M. Mueller, and T. Kirchartz
         # 'Efficiency Potential of Photovoltaic Materials and Devices Unveiled by Detailed-Balance Analysis',
         # Phys. Rev. Applied, vol. 7, no. 4, p. 044016, Apr. 2017, doi: 10.1103/PhysRevApplied.7.044016.
         # extended by gaussian fit
@@ -657,7 +657,7 @@ class EQE(object):
         Integrates over spectrum or spectra to calculate the short-circuit current density (Jsc).
 
         J = spectra * lambda * EQE(lambda)
-        Jsc = int(Pspec * EQE(lambda) * lambda) in [mA/cm2]
+        Jsc = int(Pspec * EQE(lambda) * lambda) in [mA/cm^2]
 
         Args:
             enforce_all_combinations (bool): If True, integrates all combinations of EQE and spectra.
@@ -870,7 +870,7 @@ class EQET(EQE):
     #             stext = (specname+' {0:6.2f} W/m2').format(OP)
     #             print('Eg = ',Egs, ' eV')
     #             print(stext)
-    #             print('Jsc = ',Jscs[0], ' mA/cm2')
+    #             print('Jsc = ',Jscs[0], ' mA/cm^2')
 
     #         te = time()
     #         dt=(te-ts)
@@ -1121,7 +1121,7 @@ class EQET(EQE):
         # make colorbar
         color_norm = mpl.colors.Normalize(min_temperature, max_temperature)
         sm = mpl.cm.ScalarMappable(cmap=cmap, norm=color_norm)
-        fig.colorbar(sm, ax=ax, orientation="horizontal", location="top", pad=0.01, label="Temperature (℃)")
+        fig.colorbar(sm, ax=ax, orientation="horizontal", location="top", pad=0.01, label="Temperature (degC)")
 
         # set labels
         ax.set_xlabel("Wavelength (nm)")
@@ -1164,7 +1164,7 @@ class EQET(EQE):
         # make colorbar
         color_norm = mpl.colors.Normalize(min_temperature, max_temperature)
         sm = mpl.cm.ScalarMappable(cmap=cmap, norm=color_norm)
-        fig.colorbar(sm, ax=ax, orientation="horizontal", location="top", pad=0.01, label="Temperature (℃)")
+        fig.colorbar(sm, ax=ax, orientation="horizontal", location="top", pad=0.01, label="Temperature (degC)")
 
         # set labels
         ax.set_xlabel("Wavelength (nm)")
@@ -1389,7 +1389,7 @@ class TemperatureModel:
         if plot is not None:
             fig, ax = plt.subplots(1, 1, layout="constrained")
             ax.plot(x, y, "*", label="data")
-            ax.set_xlabel("Temperature (℃)")
+            ax.set_xlabel("Temperature (degC)")
             ax.set_ylabel("Bandgap/sigma (eV)")
 
         if model_types is None:
