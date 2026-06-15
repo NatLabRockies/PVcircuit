@@ -7,7 +7,7 @@ import copy
 import multiprocessing as mp
 import warnings
 from functools import lru_cache
-from typing import List, Tuple, Union, cast
+from typing import List, Optional, Tuple, Union
 
 import numpy as np  # arrays
 import pandas as pd
@@ -112,7 +112,7 @@ def sandia_T(poa_global: Union[float, np.ndarray, pd.Series], wind_speed: Union[
     return temp_cell
 
 
-def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, TempCell: pd.Series, devlist: List[Union["pvc.Multi2T", "pvc.Tandem3T"]], oper: str) -> pd.DataFrame:
+def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, TempCell: pd.Series, devlist: Union[List[Union["pvc.Multi2T", "pvc.Tandem3T"]], np.ndarray], oper: str) -> pd.DataFrame:
 
     columns: list[str] = ["Voc", "Isc", "Vmp", "Imp", "Pmp"]
     IV_params = pd.DataFrame(np.zeros((len(Jscs), len(columns))), columns=columns)
@@ -174,11 +174,7 @@ class Meteo:
     NOTE: All arrays in this class are handled so that each row aligns with a timestamp.
     For instance, any EQE array is assumed to correspond to the same timestamps as this data,
     and each row represents EQE values for that specific time index.
-    """
-
-    """
     Handles meteorological environmental data and spectral information for energy yield simulations.
-
     """
 
     def __init__(self, wavelength: np.ndarray, spectra: pd.DataFrame, ambient_temperature: pd.Series, wind: pd.Series, datetime: pd.DatetimeIndex) -> None:
@@ -238,10 +234,10 @@ class Meteo:
         """
         Add Jsc array to the instance.
 
-        Jsc values are stored in 'self.jscs' in **mA/cm^2** (the native unit
-        of 'JintMD').  They are converted to A/cm^2 inside
-        '_calc_yield_async' before being assigned to
-        'Junction.Jext'.
+        Jsc values are stored in self.jscs in **mA/cm^2** (the native unit
+        of JintMD).  They are converted to A/cm^2 inside
+        _calc_yield_async before being assigned to
+        Junction.Jext.
 
         Args:
             jsc (np.ndarray): Short-circuit current values to add [mA/cm^2].
@@ -323,7 +319,7 @@ class Meteo:
                         for chunk in chunks
                     ]
                     # Collect and combine dataframe results
-                    results = pd.concat([cast(pd.DataFrame, job.get()) for job in jobs], ignore_index=True)
+                    results = pd.concat([job.get() for job in jobs], ignore_index=True)
 
             else:
                 pbar.set_description(f"Running {model.name} in mode {oper} without multiprocessing")
@@ -456,7 +452,7 @@ class Meteo:
         # assert len(self.spectra) == len(self.SpecPower) == len(self.TempCell) == len(self.average_photon_energy)
         return self_copy
 
-    def reindex(self, index: pd.Index, method: str = "nearest", tolerance: pd.Timedelta = pd.Timedelta(seconds=30)) -> "Meteo":
+    def reindex(self, index: pd.Index, method: str = "nearest", tolerance: Optional[pd.Timedelta] = None) -> "Meteo":
         """
         Reindex the data according to the provided time indexer.
 
@@ -468,6 +464,11 @@ class Meteo:
         Returns:
             Meteo: A new Meteo instance with reindexed data.
         """
+        if tolerance is None:
+            # pandas stubs widen Timedelta(...) to Timedelta | NaTType even though
+            # this literal call cannot produce NaT.
+            tolerance = pd.Timedelta(seconds=30)  # ty: ignore[invalid-assignment]
+
         self_copy = copy.deepcopy(self)
 
         # Reindex all pandas DataFrame or Series attributes

@@ -396,7 +396,10 @@ def test_LC_effect_on_voc3(dev3T):
     |Vrz| increases when beta is turned on.
 
     Conversely Isc3 (Vzt=Vrz=Vtr=0) is LC-insensitive because V_top=0
-    forces Jem(0)=0 and hence JLC=0.
+    forces the EL term in Jem to zero, and the PL term (Lan and Green
+    2015) is also zero here because the fixture uses the default
+    gamma=0.  Setting gamma>0 would give a nonzero PL baseline at
+    short circuit even with V_top=0.
     """
     voc_base = dev3T.Voc3()
     isc_base = dev3T.Isc3()

@@ -84,9 +84,9 @@ class Multi2T(object):
         """
         Create an independent copy of this Multi2T.
 
-        'copy.deepcopy' crashes on this class, so we build the copy manually:
+        copy.deepcopy crashes on this class, so we build the copy manually:
         the wrapper is shallow-copied, but the contained junction list and
-        each junction inside it are duplicated via 'Junction.copy()'.
+        each junction inside it are duplicated via Junction.copy().
         Mutating a junction on the returned object will therefore NOT
         affect the original device.
         """
@@ -487,15 +487,15 @@ class Multi2T(object):
 
         Pmp is divided by the incident power that strikes the device
         footprint (device totalarea = max junction totalarea), which
-        matches the convention used in 'EY.Meteo'.
+        matches the convention used in EY.Meteo.
 
         Parameters
         ----------
         Pspec : str or array-like, optional
             Reference spectrum. Either an ASTM key recognised by
-            'PintMD' (''space'', ''global'',
-            ''direct'') or a spectral irradiance array [W/m^2/nm].
-            Default ''global'' (AM1.5G, ~1000 W/m^2 \approx 0.1 W/cm^2).
+            PintMD ('space', 'global',
+            'direct') or a spectral irradiance array [W/m^2/nm].
+            Default 'global' (AM1.5G, ~1000 W/m^2 \approx 0.1 W/cm^2).
         xspec : array-like, optional
             Wavelength grid [nm] for *Pspec*. Defaults to the ASTM
             reference grid (pvcircuit.qe.wvl).
@@ -504,7 +504,7 @@ class Multi2T(object):
         -------
         eff : float
             Dimensionless efficiency (Pmp / (Pin * totalarea)). Returns
-            'np.nan' if the MPP solver returned NaN (e.g. dark device).
+            np.nan if the MPP solver returned NaN (e.g. dark device).
         """
         # Lazy import to avoid a circular dependency: pvcircuit.__init__
         # imports multi2T before qe.

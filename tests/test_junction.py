@@ -151,6 +151,26 @@ def test_jem(junction_2d):
     np.testing.assert_almost_equal(junction_2d.Jem(-0.6), 0.0)
 
 
+def test_jem_pl_at_zero_bias(junction_2d):
+    """PL coupling (Lan and Green 2015, Eq. 2b) is voltage-independent
+    and must remain present at short circuit and reverse bias.  With
+    'gamma > 0' and 'Jphoto > 0' the PL contribution dominates at
+    'Vmid <= 0' and the EL contribution is absent there.  This matches
+    the nonzero V_top=0 LC baseline reported by Tayagaki et al. 2018
+    (Fig. 5b).
+    """
+    junction_2d.set(gamma=0.1)
+    expected_pl = 0.1 * junction_2d.Jphoto
+
+    # At and below short circuit only the PL term contributes.
+    np.testing.assert_almost_equal(junction_2d.Jem(0.0), expected_pl)
+    np.testing.assert_almost_equal(junction_2d.Jem(-0.6), expected_pl)
+
+    # Above short circuit the EL term adds on top of the PL baseline.
+    el_term = junction_2d.Jdb * (np.exp(0.6 / junction_2d.Vth) - 1.0)
+    np.testing.assert_almost_equal(junction_2d.Jem(0.6), el_term + expected_pl)
+
+
 def test_notdiode(junction_2d):
 
     assert not junction_2d.notdiode()

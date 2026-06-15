@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 from functools import lru_cache
 from time import time
-from typing import List
+from typing import List, Optional, Union
 
 import numpy as np  # arrays
 import scipy.constants as con  # physical constants
@@ -65,7 +65,7 @@ def timestamp(fmt="%y%m%d-%H%M%S", tm=None) -> str:
     return date_time.strftime(fmt)
 
 
-def newoutpath(dname: str = None) -> str:
+def newoutpath(dname: Optional[str] = None) -> Optional[str]:
     # return a new output within pvc_output
     if os.path.exists(GITpath):
         pvcoutpath = os.path.join(GITpath, "pvc_output")
@@ -82,6 +82,7 @@ def newoutpath(dname: str = None) -> str:
             os.mkdir(newpath)
 
         return newpath
+    return None
 
 
 class Junction(object):
@@ -97,6 +98,12 @@ class Junction(object):
     # serialisation stay numerically well-behaved. Do not change.
     J0scale = 1000.0
 
+    # Diode arrays kept in sync via the custom __setattr__/set() pipeline.
+    # Declared here so type checkers can subscript ``self.n[i]`` /
+    # ``self.J0ratio[i]`` in ``__str__`` and other consumers.
+    n: np.ndarray
+    J0ratio: np.ndarray
+
     def __init__(
         self,
         name: str = "junc",
@@ -107,9 +114,9 @@ class Junction(object):
         Rser: float = 0.0,
         area: float = AREA_DEFAULT,
         n: List[float] = [1.0, 2.0],
-        J0ratio: float = None,
-        J0ref: float = None,
-        RBB: float = None,
+        J0ratio: Optional[Union[List[float], np.ndarray]] = None,
+        J0ref: Optional[Union[List[float], np.ndarray]] = None,
+        RBB: Optional[str] = None,
         Jext: float = 0.04,
         JLC: float = 0.0,
         J0default: float = 10.0,
@@ -262,7 +269,10 @@ class Junction(object):
 
         for testkey, value in kwargs.items():
             if testkey.endswith("]") and testkey.find("[") > 0:
-                key, ind = parse("{}[{:d}]", testkey)  # set one element of array e.g. 'n[0]'
+                parsed = parse("{}[{:d}]", testkey)  # set one element of array e.g. 'n[0]'
+                if parsed is None:
+                    raise ValueError(f"Could not parse array key {testkey!r}; expected form 'name[index]'")
+                key, ind = parsed
             else:
                 key = testkey
                 ind = None
@@ -301,7 +311,8 @@ class Junction(object):
                     localarray = attrval.copy()
                     if isinstance(localarray, np.ndarray):
                         if ind < localarray.size:
-                            localarray[ind] = np.float64(value)  # add new value
+                            # np.isscalar above guards at runtime; ty can't narrow it.
+                            localarray[ind] = np.float64(value)  # ty: ignore[invalid-argument-type]
                             self.__dict__[key] = localarray
                             # with self.debugout:
                             #     print("scalar", key, ind, localarray)
@@ -355,17 +366,17 @@ class Junction(object):
         fraction of the total area) and the luminescent-coupling current
         injected from a neighbouring junction:
 
-            'Jphoto = Jext * (lightarea / totalarea) + JLC'.
+            Jphoto = Jext * (lightarea / totalarea) + JLC.
 
-        The area scaling assumes 'Jext' is referenced to 'lightarea' and
-        spreads it uniformly across 'totalarea' so shaded regions
+        The area scaling assumes Jext is referenced to lightarea and
+        spreads it uniformly across totalarea so shaded regions
         contribute zero photocurrent.
         """
         return self.Jext * self.lightarea / self.totalarea + self.JLC
 
     @property
     def TK(self) -> float:
-        """[K] junction temperature in Kelvin (derived from 'TC')."""
+        """[K] junction temperature in Kelvin (derived from TC)."""
         return TK(self.TC)
 
     @property
@@ -377,36 +388,35 @@ class Junction(object):
     def Jdb(self) -> float:
         """[A/cm^2] radiative (detailed-balance) saturation current density.
 
-        Computed from 'Eg', 'sigma', and 'TC' via the Rau et
-        al. formulation. This is a thermodynamic quantity (not a free
-        parameter) and forms the irreducible lower bound on 'J0'.
+        Computed via the Rau et al. formulation. This is a thermodynamic quantity (not a free
+        parameter) and forms the irreducible lower bound on J0.
         """
         return Jdb(self.TC, self.Eg, self.sigma)
 
     @property
-    def J0(self) -> float:
-        """[A/cm^2] per-diode saturation current densities '[J0(n0), J0(n1), ...]'.
+    def J0(self) -> np.ndarray:
+        """[A/cm^2] per-diode saturation current densities [J0(n0), J0(n1), ...].
 
-        Recomputed on every access from 'Jdb', 'n', and
-        'J0ratio' using the formula
+        Recomputed on every access from Jdb, n, and
+        J0ratio using the formula
 
-            'J0[i] = (Jdb * J0scale)^(1/n[i]) * J0ratio[i] / J0scale'
+            J0[i] = (Jdb * J0scale)^(1/n[i]) * J0ratio[i] / J0scale
 
-        where 'J0scale = 1000' is an internal numerical-stability factor
-        (see the class-level comment on 'J0scale'). Because
-        'Jdb' depends on temperature, 'J0' automatically tracks
-        changes in 'TC'.
+        where J0scale = 1000 is an internal numerical-stability factor
+        (see the class-level comment on J0scale). Because
+        Jdb depends on temperature, J0 automatically tracks
+        changes in TC.
         """
 
         if (isinstance(self.n, np.ndarray)) and (isinstance(self.J0ratio, np.ndarray)):
             if self.n.size == self.J0ratio.size:
                 return (self.Jdb * self.J0scale) ** (1.0 / self.n) * self.J0ratio / self.J0scale
             else:
-                return np.nan  # different sizes
+                return np.array(np.nan, dtype=np.float64)  # different sizes
         else:
-            return np.nan  # not numpy.ndarray
+            return np.array(np.nan, dtype=np.float64)  # not numpy.ndarray
 
-    def _J0init(self, J0ref: float):
+    def _J0init(self, J0ref: Union[List[float], np.ndarray]):
         """
         initialize self.J0ratio from J0ref
         """
@@ -417,17 +427,31 @@ class Junction(object):
             raise ValueError("J0ref and n must be same size")
 
     def Jem(self, Vmid: float) -> float:
+        r"""[A/cm^2] light emitted from the junction (current density).
+
+        Two physically distinct contributions per Lan and Green,
+        Appl. Phys. Lett. 106, 263902 (2015), Eqs. 2a-2b:
+
+        * EL (Rau reciprocity): carriers that reach the junction and
+          recombine radiatively across the depletion region.  Scales
+          as Jdb * (exp(Vmid/Vth) - 1) and vanishes at short circuit.
+          Suppressed for Vmid <= 0 because the diode-equation form
+          would otherwise describe absorption, not emission.
+        * PL (Lan and Green): carriers that recombine radiatively in
+          the absorber before reaching the junction.  Scales as
+          gamma * Jphoto and is present at every bias, including
+          short circuit and reverse bias.  Tayagaki et al. 2018
+          (Fig. 5b) shows this nonzero V_top=0 baseline experimentally.
+
+        With the default gamma = 0 the PL term is zero, so Jem
+        reduces to the pure-EL form and Jem(Vmid <= 0) == 0.
         """
-        light emitted from junction by reciprocity
-        quantified as current density
-        """
-        # TODO swich to raise instead return
+        # PL contribution is voltage-independent (still active at V <= 0).
+        Jem = self.gamma * self.Jphoto  # PL Lan and Green
+        # EL contribution only above short circuit.
         if Vmid > 0.0:
-            Jem = self.Jdb * (np.exp(Vmid / self.Vth) - 1.0)  # EL Rau
-            Jem += self.gamma * self.Jphoto  # PL Lan and Green
-            return Jem
-        else:
-            return 0.0
+            Jem += self.Jdb * (np.exp(Vmid / self.Vth) - 1.0)  # EL Rau
+        return Jem
 
     def notdiode(self) -> bool:
         """

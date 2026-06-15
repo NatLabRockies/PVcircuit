@@ -76,58 +76,58 @@ class IV3T(object):
     """Operational state of a 3-terminal tandem.
 
     All array attributes have the same shape (set at construction). A scalar
-    shape of '0' produces 0-d arrays, '(N,)' produces line scans, and a
-    tuple such as '(N, M)' produces a 2-d operating grid.
+    shape of 0 produces 0-d arrays, (N,) produces line scans, and a
+    tuple such as (N, M) produces a 2-d operating grid.
 
     Units and conventions
     ---------------------
     Device currents (absolute, **not** densities):
-        - 'Iro', 'Izo', 'Ito' -- currents flowing out of the R, Z, and T
-          terminals [A]. Kirchhoff requires 'Iro + Izo + Ito = 0'. Convert
-          to density with 'J = I / area'.
+        - Iro, Izo, Ito -- currents flowing out of the R, Z, and T
+          terminals [A]. Kirchhoff requires Iro + Izo + Ito = 0. Convert
+          to density with J = I / area.
 
     Device voltages (relative inter-terminal):
-        - 'Vzt', 'Vrz', 'Vtr' -- inter-terminal voltage differences [V]
-          (e.g. 'Vzt = V_z - V_t'). They are **not** absolute junction
-          voltages. By construction 'Vzt + Vrz + Vtr = 0'.
+        - Vzt, Vrz, Vtr -- inter-terminal voltage differences [V]
+          (e.g. Vzt = V_z - V_t). They are **not** absolute junction
+          voltages. By construction Vzt + Vrz + Vtr = 0.
 
     Load (instrument-frame) variables:
-        - 'VA', 'VB' -- load voltages [V] applied by sources A and B.
-        - 'IA', 'IB' -- load currents [A]. Negative => power extracted.
+        - VA, VB -- load voltages [V] applied by sources A and B.
+        - IA, IB -- load currents [A]. Negative => power extracted.
 
-    Mapping between device and load variables depends on 'meastype':
+    Mapping between device and load variables depends on meastype:
 
         ====== ======== ======== ======== ========
         meas.  VA       VB       IA       IB
         ====== ======== ======== ======== ========
-        'CZ' 'Vrz'  '-Vzt' 'Iro'  'Ito'
-        'CR' '-Vrz' 'Vtr'  'Izo'  'Ito'
-        'CT' '-Vtr' 'Vzt'  'Iro'  'Izo'
-        'CF' '-Vfr' 'Vzf'  'Iro'  'Izo'
+        'CZ'   Vrz      -Vzt     Iro      Ito
+        'CR'   -Vrz     Vtr      Izo      Ito
+        'CT'   -Vtr     Vzt      Iro      Izo
+        'CF'   -Vfr     Vzf      Iro      Izo
         ====== ======== ======== ======== ========
 
-        See 'meas_dict' for the authoritative mapping.
+        See meas_dict for the authoritative mapping.
 
     Derived quantities:
-        - 'Ptot' -- total output power [W], computed as '-IA*VA - IB*VB'.
+        - Ptot -- total output power [W], computed as -IA*VA - IB*VB.
           Positive values mean the device is delivering power. Undefined
-          points are encoded as the sentinel '-100.0' (see 'Pcalc').
-        - 'Ixhex'/'Iyhex', 'Vxhex'/'Vyhex' -- isometric hex-coordinate
+          points are encoded as the sentinel -100.0 (see Pcalc).
+        - Ixhex/Iyhex, Vxhex/Vyhex -- isometric hex-coordinate
           projections of the (Iro, Izo, Ito) and (Vzt, Vrz, Vtr) triples,
           used for hex-grid plots.
 
     Other attributes:
-        - 'area' [cm^2] -- nominal device area. **Informational only**:
+        - area [cm^2] -- nominal device area. **Informational only**:
           IV3T stores absolute currents and voltages, and none of the
-          coordinate or load conversions in this class read 'area'.
-          External callers (e.g. 'tandem3T.Tandem3T')
-          may use it to recover current densities via 'J = I / area',
+          coordinate or load conversions in this class read area.
+          External callers (e.g. tandem3T.Tandem3T)
+          may use it to recover current densities via J = I / area,
           but the value is not synchronised with any device.
-        - 'meastype' -- one of ''CZ'', ''CR'', ''CT'', ''CF''
-          (appending an extra character such as ''CZo'' swaps the A/B
+        - meastype -- one of 'CZ', 'CR', 'CT', 'CF'
+          (appending an extra character such as 'CZo' swaps the A/B
           load assignment for that measurement).
-        - 'shape' -- tuple describing the array dimensionality.
-        - 'names' -- per-point labels (flat list of length 'size').
+        - shape -- tuple describing the array dimensionality.
+        - names -- per-point labels (flat list of length size).
     """
 
     arraykeys = ["Iro", "Izo", "Ito", "Vzt", "Vrz", "Vtr", "IA", "IB", "VA", "VB", "Ptot", "Ixhex", "Iyhex", "Vxhex", "Vyhex"]
@@ -161,10 +161,10 @@ class IV3T(object):
         self.area = area
 
         # force shape to be tuple
-        if np.ndim(shape) == 0:  # not iterable
-            self.shape = (shape,)
+        if isinstance(shape, (int, np.integer)):  # not iterable
+            self.shape = (int(shape),)
         else:  # iterable
-            self.shape = tuple(shape)  # type: ignore[arg-type]
+            self.shape = tuple(shape)
 
         for key in self.arraykeys:
             setattr(self, key, np.full(shape, np.nan, dtype=np.float64))
@@ -279,7 +279,7 @@ class IV3T(object):
         """
         create a 1D ndarray on xkey with evenly spaced values (log=False)
         or log spaced values (log=True) +10^x0 to +10^x1 and -10^x0 to -10^x1
-        ykey is constrained to xkey with eval expression using 'x'
+        ykey is constrained to xkey with eval expression using x
         """
 
         if log:
@@ -629,7 +629,7 @@ class IV3T(object):
         self.Ptot = -self.IA * self.VA - self.IB * self.VB
         # Replace NaN points with the sentinel value -100.0 so they fall below
         # ``vmin=0`` in heat-map plots. Paired with the
-        # ``cmap.with_extremes(under='white')`` call in 'plot', this
+        # ``cmap.with_extremes(under='white')`` call in plot, this
         # renders both undefined and physically-negative power points as
         # white. Downstream code that needs to detect undefined points should
         # compare with the sentinel directly rather than calling ``np.isnan``.
@@ -759,9 +759,9 @@ class IV3T(object):
         import csv file as data table into iv3T object
         two 2D arrays with x and y index on top and left
         load variables:
-        VA(IA,IB) & VB(IA,IB) .......... VorI='I'
+        VA(IA,IB) & VB(IA,IB) .......... VorI=I
             or
-        IA(VA,VB) & IB(VA,VB) .......... VorI='V'
+        IA(VA,VB) & IB(VA,VB) .......... VorI=V
         Iscale converts current mA -> A or mA/cm^2-> A
         """
 
@@ -963,7 +963,7 @@ class IV3T(object):
         if cmap:  # don't add image if cmap == None
             # ``vmin=0`` on the imshow below means values < 0 are rendered with the
             # "under" colour. That covers both physical negative power *and* the
-            # -100.0 sentinel that 'Pcalc' writes in place of NaN.
+            # -100.0 sentinel that Pcalc writes in place of NaN.
             cmap = plt.get_cmap(cmap).with_extremes(under="white")  # white for Ptot < 0 and nan
             if xkey == self.xkey and ykey == self.ykey:
                 # image if evenly spaced
