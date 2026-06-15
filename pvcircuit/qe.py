@@ -10,7 +10,7 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from time import time
-from typing import Callable, Dict, List, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import matplotlib as mpl  # plotting
 import matplotlib.pyplot as plt  # plotting
@@ -110,7 +110,7 @@ def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[floa
     else:
         return "dims in EQE:" + str(EQE.ndim)
 
-    Eguess = np.array([Eguess] * njuncs)
+    Eguess_arr = np.array([Eguess] * njuncs)
 
     if len(xEQE) == 2:  # evenly spaced x-values (start, stop)
         start, stop = xEQE
@@ -133,7 +133,7 @@ def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[floa
     blackbody = np.expand_dims(DBWVL_PREFIX / (xEQE * 1e-9) ** 4 / np.expm1(EkT), axis=1)
 
     for count in range(10):
-        nmfilter = nm2eV / (Eguess - Vthlocal * kTfilter)  # MD [652., 930.]
+        nmfilter = nm2eV / (Eguess_arr - Vthlocal * kTfilter)  # MD [652., 930.]
         if njuncs == 1:
             EQEfilter = np.expand_dims(EQE.copy(), axis=1)
         else:
@@ -146,11 +146,11 @@ def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[floa
         Jdb = trapezoid(DBintegral, x=(xEQE * 1e-9), axis=0)
         Egnew = Egvect(TC, Jdb)
         if bplot:
-            print(Egnew, max((Egnew - Eguess) / Egnew))
-        if np.amax((Egnew - Eguess) / Egnew) < 1e-6:
+            print(Egnew, max((Egnew - Eguess_arr) / Egnew))
+        if np.amax((Egnew - Eguess_arr) / Egnew) < 1e-6:
             break
         else:
-            Eguess = Egnew
+            Eguess_arr = Egnew
 
     if bplot:
         efig, eax = plt.subplots()
@@ -187,11 +187,11 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
     default x values for Pspec from wvl
 
     .. note::
-        **Return unit**: when 'EQE' is supplied the result is the
-        short-circuit current density in **mA/cm^2** (via 'JCONST').
-        'Junction' stores 'Jext' in **A/cm^2**,
+        **Return unit**: when EQE is supplied the result is the
+        short-circuit current density in **mA/cm^2** (via JCONST).
+        Junction stores Jext in **A/cm^2**,
         so callers that feed this into the junction model must divide by
-        '1000' first (see 'EY.Meteo' for an example).
+        1000 first (see EY.Meteo for an example).
     """
 
     # check spectra input
@@ -491,7 +491,7 @@ class EQE(object):
         self.etas = np.zeros((self.njuncs, 3), dtype=np.float64)  # LC factor for next junctions
         self.LCcorr()  # calculate LC with zero etas
 
-    def calc_Eg_Rau(self, return_sigma: bool = True, fit_gaussian: bool = True, plot_fits: bool = False) -> Tuple[List[float], List[float]]:
+    def calc_Eg_Rau(self, return_sigma: bool = True, fit_gaussian: bool = True, plot_fits: bool = False) -> Tuple[List[float], List[Optional[float]]]:
         # using U. Rau, B. Blank, T. C. M. Mueller, and T. Kirchartz
         # 'Efficiency Potential of Photovoltaic Materials and Devices Unveiled by Detailed-Balance Analysis',
         # Phys. Rev. Applied, vol. 7, no. 4, p. 044016, Apr. 2017, doi: 10.1103/PhysRevApplied.7.044016.
@@ -627,13 +627,13 @@ class EQE(object):
     def Jdb(self, TC: float, Eguess: float = 1.0, kTfilter: int = 3, dbug: bool = False) -> Tuple[np.ndarray, np.ndarray]:
         """It calculate Jscs and Egs from self.corrEQE"""
         Vthlocal = convert.Vth(TC)  # kT
-        Eguess = np.array([Eguess] * self.njuncs)
+        Eguess_arr = np.array([Eguess] * self.njuncs)
         Egvect = np.vectorize(EgFromJdb)
         EkT = nm2eV / Vthlocal / self.wavelength
         blackbody = DBWVL_PREFIX / (self.wavelength * 1e-9) ** 4 / np.expm1(EkT)
 
         for count in range(10):
-            nmfilter = nm2eV / (Eguess - Vthlocal * kTfilter)  # MD [652., 930.]
+            nmfilter = nm2eV / (Eguess_arr - Vthlocal * kTfilter)  # MD [652., 930.]
             EQEfilter = self.corrEQE.copy()
 
             for i, lam in enumerate(self.wavelength):
@@ -643,11 +643,11 @@ class EQE(object):
             Jdb = trapezoid(DBintegral, x=(self.wavelength * 1e-9), axis=0)
             Egnew = Egvect(TC, Jdb)
             if dbug:
-                print(Egnew, max((Egnew - Eguess) / Egnew))
-            if np.amax((Egnew - Eguess) / Egnew) < 1e-6:
+                print(Egnew, max((Egnew - Eguess_arr) / Egnew))
+            if np.amax((Egnew - Eguess_arr) / Egnew) < 1e-6:
                 break
             else:
-                Eguess = Egnew
+                Eguess_arr = Egnew
             self.Egs = Egnew
 
         return Jdb, Egnew
@@ -775,9 +775,9 @@ class EQET(EQE):
         self.eqe = self.eqe[:, temperature_sorter]
         self.corrEQE = self.corrEQE[:, temperature_sorter]
 
-    def _qe_from_model(self, temperature: np.ndarray) -> "EQET":  # type: ignore[override]
+    def _qe_from_model(self, temperature: np.ndarray) -> "EQET":
 
-        pass  # not yet implemented
+        raise NotImplementedError("EQET._qe_from_model is not yet implemented")
 
     # def controls(self, Pspec='global', ispec=0, specname=None, xspec=wvl):
     #     '''
@@ -1068,7 +1068,7 @@ class EQET(EQE):
         sr = self.eqe.T / np.asarray(convert.photonenergy_to_wavelength(self.wavelength.flatten()))
         return sr.T
 
-    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: Union[float, np.ndarray] = 25, sjuncs: Union[str, None] = None) -> None:  # type: ignore[override]
+    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: Union[float, np.ndarray] = 25, sjuncs: Union[str, None] = None) -> None:  # ty: ignore[invalid-method-override]
         """
         Add EQE(T)
 
@@ -1085,7 +1085,7 @@ class EQET(EQE):
         self.temperature = np.concatenate((self.temperature, temperature_add))
         self._sort_by_temperature()
 
-    def plot(self, fig: Union[plt.Figure, None] = None, ax: Union[plt.Axes, None] = None) -> Tuple[plt.Axes, plt.Axes]:  # type: ignore[override]
+    def plot(self, fig: Union[plt.Figure, None] = None, ax: Union[plt.Axes, None] = None) -> Tuple[plt.Axes, plt.Axes]:  # ty: ignore[invalid-method-override]
         """
         Plot the EQE(T). Lines are colored by temperature.
 

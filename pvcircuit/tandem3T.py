@@ -57,10 +57,10 @@ class Tandem3T(object):
         """
         Create an independent copy of this Tandem3T.
 
-        'copy.deepcopy' crashes on this class (legacy comment retained
+        copy.deepcopy crashes on this class (legacy comment retained
         from the original implementation), so we build the copy manually:
-        the wrapper is shallow-copied and the 'top' and 'bot' junctions
-        are duplicated via 'Junction.copy()' so the returned device is
+        the wrapper is shallow-copied and the top and bot junctions
+        are duplicated via Junction.copy() so the returned device is
         fully independent.
         """
         tmp = copy.copy(self)
@@ -164,7 +164,7 @@ class Tandem3T(object):
     def V3T(self, iv3T):
         """
         calcuate iv3T.(Vzt,Vrz,Vtr) from iv3T.(Iro,Izo,Ito)
-        input class tandem.IV3T object 'iv3T'
+        input class tandem.IV3T object iv3T
         """
 
         top = self.top  # top Junction
@@ -250,7 +250,7 @@ class Tandem3T(object):
         """
         calcuate (Jro,Jzo,Jto) mapped -> iv3T.(Iro,Izo,Ito)
         from ABSOLUTE (Vz,Vr,Vt) mapped <- iv3T.(Vzt,Vrz,Vtr)
-        input class tandem.IV3T object 'iv3T'
+        input class tandem.IV3T object iv3T
         Operates on absolute voltages, directly using the actual voltages Vz, Vr, and Vt to calculate the currents.
         Calculates the currents directly by applying the voltage directly into the junction models.
 
@@ -375,7 +375,7 @@ class Tandem3T(object):
         """
         calcuate (Jro,Jzo,Jto) mapped -> iv3T.(Iro,Izo,Ito)
         from RELATIVE iv3T.(Vzt,Vrz,Vtr) ignoring Vtr
-        input class tandem.IV3T object 'iv3T'
+        input class tandem.IV3T object iv3T
 
         operates on relative voltages, taking the input voltages Vzt and Vrz, and calculates currents while ignoring Vtr.
         Iteratively adjusts these voltages using resistance models to calculate the current densities. Uses iterative method to find the
@@ -669,8 +669,8 @@ class Tandem3T(object):
         as experimentally done
         varying I is faster than varying V
         but initial guess is not as good
-        'less' must be > 1.0
-        if FF is really bad, may need larger 'less'
+        less must be > 1.0
+        if FF is really bad, may need larger less
         bplot for debugging information
         """
 
@@ -764,20 +764,20 @@ class Tandem3T(object):
     def efficiency(self, Pspec="global", xspec=None):
         """Power-conversion efficiency under a reference spectrum.
 
-        For a 3T device 'MPP' returns an 'IV3T' point whose
-        absolute power is 'pt.Ptot[0]' [W]. Efficiency normalises that
+        For a 3T device MPP returns an IV3T point whose
+        absolute power is pt.Ptot[0] [W]. Efficiency normalises that
         power by the incident power on the device footprint
-        ('self.totalarea = max(top.totalarea, bot.totalarea)'), matching
-        the convention used in 'EY.Meteo' and
-        'Multi2T.efficiency'.
+        (self.totalarea = max(top.totalarea, bot.totalarea)), matching
+        the convention used in EY.Meteo and
+        Multi2T.efficiency.
 
         Parameters
         ----------
         Pspec : str or array-like, optional
             Reference spectrum. Either an ASTM key recognised by
-            'PintMD' (''space'', ''global'',
-            ''direct'') or a spectral irradiance array [W/m^2/nm].
-            Default ''global'' (AM1.5G, ~1000 W/m^2 \\approx 0.1 W/cm^2).
+            PintMD ('space', 'global',
+            'direct') or a spectral irradiance array [W/m^2/nm].
+            Default 'global' (AM1.5G, ~1000 W/m^2 \\approx 0.1 W/cm^2).
         xspec : array-like, optional
             Wavelength grid [nm] for *Pspec*. Defaults to the ASTM
             reference grid (pvcircuit.qe.wvl).
@@ -786,7 +786,7 @@ class Tandem3T(object):
         -------
         eff : float
             Dimensionless efficiency (Ptot / (Pin * totalarea)). Returns
-            'np.nan' if the MPP solver could not converge.
+            np.nan if the MPP solver could not converge.
         """
         # Lazy import to avoid a circular dependency: pvcircuit.__init__
         # imports tandem3T before qe.
