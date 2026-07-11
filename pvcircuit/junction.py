@@ -13,10 +13,12 @@ from datetime import datetime
 from functools import lru_cache
 from time import time
 from typing import List, Optional, Union
+import warnings
 
 import numpy as np  # arrays
 import scipy.constants as con  # physical constants
 from parse import parse
+from scipy.integrate import quad  # numerical integration for non-Gaussian band tails
 from scipy.optimize import brentq  # root finder
 
 from pvcircuit.conversions import DB_PREFIX, HC_E, K_Q, TK, Vth
@@ -40,21 +42,87 @@ MAXITER = 1000
 GITpath = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
 @lru_cache(maxsize=100)
-def Jdb(TC: float, Eg: float, sigma: float = 0):
-    # detailed balance saturation current
+def Jdb(TC: float, Eg: float, sigma: float = 0, theta: float = 2.0):
+    """[A/cm^2] detailed-balance reverse saturation current density.
 
-    EgkT = Eg / Vth(TC)
+    Two physical models, selected by ``theta``:
 
-    # Jdb from Geisz et al.
-    # return DB_PREFIX * TK(TC) ** 3.0 * (EgkT * EgkT + 2.0 * EgkT + 2.0) * np.exp(-EgkT)  # units from DB_PREFIX
+    - ``theta = 2.0`` (default, Mattheis-Rau-Werner): ``sigma`` is the
+      standard deviation [eV] of a Gaussian distribution of local bandgaps.
+      Uses the historical pvcircuit closed-form expression. This is the
+      backward-compatible path; existing call sites and serialized devices
+      are unaffected.
 
-    # Jdb from Rau et al.
-    return (
-        DB_PREFIX
-        * TK(TC) ** 3.0
-        * (EgkT * EgkT + 2.0 * EgkT + 2.0 - 2 * sigma**2 * Eg / (Vth(TC)) ** 3 - sigma**2 / (Vth(TC)) ** 2 + sigma**4 / (Vth(TC)) ** 4)
-        * np.exp(-EgkT + sigma**2 / (2 * (Vth(TC)) ** 2))
-    )  # units from DB_PREFIX
+    - ``theta != 2.0`` (generalized Urbach, Katahara et al. 2014 JAP 116,
+      173504): ``sigma`` is reinterpreted as the energy scale gamma_U [eV]
+      of an exponential-family sub-bandgap tail
+
+          a(E) = exp(-((Eg - E) / sigma) ** theta)   for  E < Eg
+          a(E) = 1                                     for  E >= Eg
+
+      Integrated numerically against the Boltzmann blackbody tail.
+
+      Suggested theta values (Katahara 2014):
+          theta = 1     : true Urbach (GaAs ~ 9 meV, perovskite, a-Si)
+          theta = 5/4   : screened Thomas-Fermi (CZTS-like)
+          theta = 3/2   : Franz-Keldysh (CIGS)
+          theta = 2     : Werner-Rau (uses the closed form above)
+
+    For ``sigma == 0`` both models reduce to the Shockley-Queisser step
+    result independent of ``theta``, so all existing zero-sigma callers and
+    baseline tests are unchanged.
+
+    A UserWarning is emitted in the numerical path when ``sigma > 3 * Vth``,
+    because the generalized-Urbach absorptivity model becomes physically
+    suspect when the tail energy exceeds a few thermal voltages.
+    """
+
+    Vthlocal = Vth(TC)
+    TKlocal = TK(TC)
+    EgkT = Eg / Vthlocal
+    sq_bracket = EgkT * EgkT + 2.0 * EgkT + 2.0
+
+    # Detailed balance step (no tail). Both theta branches collapse here.
+    if sigma == 0:
+        return DB_PREFIX * TKlocal ** 3.0 * sq_bracket * np.exp(-EgkT)
+
+    if theta == 2.0:
+        # Mattheis-Rau-Werner Gaussian bandgap-fluctuation closed form.
+        # Historical pvcircuit expression, preserved verbatim.
+        return (
+            DB_PREFIX
+            * TKlocal ** 3.0
+            * (
+                sq_bracket
+                - 2 * sigma**2 * Eg / Vthlocal**3
+                - sigma**2 / Vthlocal**2
+                + sigma**4 / Vthlocal**4
+            )
+            * np.exp(-EgkT + sigma**2 / (2 * Vthlocal**2))
+        )
+
+    # Generalized-Urbach numerical integration.
+    if sigma > 3.0 * Vthlocal:
+
+        warnings.warn(
+            "Jdb: sigma={:.3g} eV exceeds 3*Vth ({:.3g} eV) at TC={} C. "
+            "Generalized-Urbach result may be unphysical.".format(
+                sigma, 3.0 * Vthlocal, TC
+            ),
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # Bracket = integral_0^inf a(x) * x^2 * exp(-x) dx with x = E/Vth.
+    # Above-Eg piece (a=1, closed form): exp(-EgkT) * (EgkT^2 + 2 EgkT + 2).
+    # Below-Eg piece (numerical): a(E) = exp(-((Eg-E)/sigma)^theta).
+    def _integrand(x):
+        u = EgkT - x  # = (Eg - E) / Vth, > 0 on the below-Eg interval
+        ratio = u * Vthlocal / sigma  # = (Eg - E) / sigma
+        return np.exp(-(ratio ** theta)) * x * x * np.exp(-x)
+
+    below_eg, _ = quad(_integrand, 0.0, EgkT, limit=200, epsrel=1e-10)
+    return DB_PREFIX * TKlocal ** 3.0 * (np.exp(-EgkT) * sq_bracket + below_eg)
 
 
 def timestamp(fmt="%y%m%d-%H%M%S", tm=None) -> str:
@@ -90,7 +158,7 @@ class Junction(object):
     Class for PV junctions.
     """
 
-    ATTR = ["Eg", "TC", "Gsh", "Rser", "area", "lightarea", "totalarea", "Jext", "JLC", "beta", "gamma", "pn", "Jphoto", "TK", "Jdb", "RBB"]
+    ATTR = ["Eg", "TC", "Gsh", "Rser", "area", "lightarea", "totalarea", "Jext", "JLC", "beta", "gamma", "theta", "pn", "Jphoto", "TK", "Jdb", "RBB"]
     ARY_ATTR = ["n", "J0ratio", "J0"]
     # Internal numerical-stability factor (mA/cm^2). With ``Jdb ~ 1e-26`` and
     # ``J0 ~ 1e-21`` the ratio ``J0/Jdb^(1/n)`` would otherwise span ~20 orders
@@ -103,6 +171,11 @@ class Junction(object):
     # ``self.J0ratio[i]`` in ``__str__`` and other consumers.
     n: np.ndarray
     J0ratio: np.ndarray
+
+    # Class-level default so legacy pickled Junctions (created before the
+    # generalized-Urbach `theta` was added) still work. New instances
+    # shadow this with ``self.theta = np.float64(theta)`` in __init__.
+    theta: float = 2.0
 
     def __init__(
         self,
@@ -123,6 +196,7 @@ class Junction(object):
         pn: int = -1,
         beta: float = BETA_DEFAULT,
         gamma: float = 0.0,
+        theta: float = 2.0,
     ):
 
         self.ui = None
@@ -143,6 +217,7 @@ class Junction(object):
         self.pn = int(pn)  #: polarity flag: +1 for p-on-n, -1 for n-on-p (sign convention)
         self.beta = np.float64(beta)  #: [unitless] luminescent coupling efficiency (top -> bottom radiative coupling)
         self.gamma = np.float64(gamma)  #: [unitless] photoluminescent coupling coefficient (Lan et al. PL parameter)
+        self.theta = np.float64(theta)  #: [unitless] band-tail shape exponent (default 2.0 = Mattheis-Rau-Werner Gaussian; 1.0 = true Urbach; see Jdb())
         self.JLC = np.float64(JLC)  #: [A/cm^2] luminescent coupling current density injected from the previous junction (``beta * Jem`` of the neighbour)
 
         # multiple diodes
@@ -194,6 +269,9 @@ class Junction(object):
         strout += "\nlightA = {0:g} cm^2, totalA = {1:g} cm^2".format(self.lightarea, self.totalarea)
 
         strout += "\npn = {0:d}, beta = {1:g}, gamma = {2:g}".format(self.pn, self.beta, self.gamma)
+        # theta only shown when non-default so existing __str__ baselines stay byte-identical.
+        if self.theta != 2.0:
+            strout += ", theta = {0:g}".format(self.theta)
 
         strout += "\n {0:^5s} {1:^10s} {2:^10s}".format("n", "J0ratio", "J0(A/cm^2)")
         strout += "\n {0:^5s} {1:^10.0f} {2:^10.3e}".format("db", 1.0, self.Jdb)
@@ -391,7 +469,10 @@ class Junction(object):
         Computed via the Rau et al. formulation. This is a thermodynamic quantity (not a free
         parameter) and forms the irreducible lower bound on J0.
         """
-        return Jdb(self.TC, self.Eg, self.sigma)
+        # ``self.theta`` falls back to the class-level default 2.0 for legacy pickled
+        # Junctions that predate the generalized-Urbach attribute, preserving the
+        # historical Mattheis-Rau-Werner behaviour for those instances.
+        return Jdb(self.TC, self.Eg, self.sigma, theta=self.theta)
 
     @property
     def J0(self) -> np.ndarray:
