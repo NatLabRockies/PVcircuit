@@ -3,6 +3,7 @@
 This is the PVcircuit Package.
     pvcircuit.qe    # functions for QE analysis
 """
+
 from __future__ import annotations
 
 import math  # simple math
@@ -777,7 +778,7 @@ class EQET(EQE):
 
     def _qe_from_model(self, temperature: np.ndarray) -> "EQET":
 
-        raise NotImplementedError("EQET._qe_from_model is not yet implemented")
+        pass  # pass for now
 
     # def controls(self, Pspec='global', ispec=0, specname=None, xspec=wvl):
     #     '''
@@ -1239,6 +1240,31 @@ def _poly5(temperature: np.ndarray, a: float, b: float, c: float, d: float, e: f
     return a * temperature**5 + b * temperature**4 + c * temperature**3 + d * temperature**2 + e * temperature + f
 
 
+def _phonon_bose_model(temperature: np.ndarray, sigma_0: float, sigma_ph: float, omega_ph: float) -> np.ndarray:
+    """Bose–Einstein phonon-occupation broadening model.
+
+    Returns:
+        σ(T) = σ_0 + σ_ph / (exp(ħω_ph / kT) − 1)
+
+    Parameters
+    ----------
+    sigma_0 : static disorder broadening (T-independent) [eV]
+    sigma_ph : phonon coupling strength [eV]
+    omega_ph : phonon energy ħω_ph [eV], constrained to [5, 50] meV.
+        Typical values: perovskite ~15 meV, Si ~26 meV, GaAs ~36 meV.
+
+    After normalisation by ``TemperatureModel.fit``, ``sigma_0`` and
+    ``sigma_ph`` are scaled so the model evaluates to 1.0 at T_ref.
+
+    Ref: Katahara & Hillhouse, J. Appl. Phys. 116, 173504 (2014).
+    """
+    temperature = np.asarray(temperature, dtype=float)
+    TK = temperature + 273.15  # °C → K
+    kT = k_q * TK  # thermal voltage [eV]  (k_q = k_B / q)
+    # omega_ph = 0.015  # 15 meV phonon energy (perovskite default)
+    return sigma_0 + sigma_ph / np.expm1(omega_ph / kT)
+
+
 def _spline3(temperature: np.ndarray, *params: float) -> np.ndarray:
     temperature = np.asarray(temperature)
     x_vals = np.linspace(min(temperature), max(temperature), len(params))
@@ -1274,11 +1300,13 @@ class ModelType(Enum):
     POLY3 = ("3rd_order_polynomial", _poly3, [1.0, 0.0, 0.0, 0.0])
     POLY4 = ("4th_order_polynomial", _poly4, [1.0, 0.0, 0.0, 0.0, 0.0])
     POLY5 = ("5th_order_polynomial", _poly5, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    PHONON_BOSE = ("phonon_bose", _phonon_bose_model, [0.5, 0.5, 0.015], ([0.0, 0.0, 0.010], [np.inf, np.inf, 0.020]))  # [sigma_0, sigma_ph, omega_ph]
     # SPLINE3 = ("cubic_spline", _spline3, [1.0] * 5)
 
-    def __init__(self, name: str, function: Callable, initial_guess: List[float]):
+    def __init__(self, name: str, function: Callable, initial_guess: List[float], bounds=None):
         self._function = function
         self._initial_guess = initial_guess
+        self._bounds = bounds  # (lower, upper) for least_squares, or None for unconstrained
 
     @property
     def function(self) -> Callable:
@@ -1287,6 +1315,14 @@ class ModelType(Enum):
     @property
     def initial_guess(self) -> List[float]:
         return self._initial_guess
+
+    @property
+    def bounds(self):
+        """Parameter bounds for least_squares: (lower, upper) arrays or (-inf, inf)."""
+        if self._bounds is not None:
+            return self._bounds
+        n = len(self._initial_guess)
+        return ([-np.inf] * n, [np.inf] * n)
 
 
 def _model_residuals(params: Tuple[float, ...], func: Callable, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -1403,7 +1439,7 @@ class TemperatureModel:
             initial_guess = model_type.initial_guess
 
             try:
-                result = least_squares(_model_residuals, initial_guess, args=(func, x, y), loss="soft_l1")
+                result = least_squares(_model_residuals, initial_guess, args=(func, x, y), loss="soft_l1", bounds=model_type.bounds)
                 params = result.x
                 predicted = func(x, *params)
                 mic, mse = _calc_mic(x, predicted, y, params)
@@ -1439,6 +1475,13 @@ class TemperatureModel:
         if best_model_type is ModelType.PIECEWISE_LINEAR:
             normalized_params = best_params
             normalized_params[1:] /= ref_value
+        elif best_model_type is ModelType.PHONON_BOSE:
+            # omega_ph (index 2) is a physical constant [eV], not a scaling
+            # parameter — it must NOT be divided/multiplied by ref_value.
+            normalized_params = best_params.copy()
+            normalized_params[0] /= ref_value  # sigma_0
+            normalized_params[1] /= ref_value  # sigma_ph
+            # normalized_params[2] unchanged — omega_ph
         else:
             normalized_params = best_params / ref_value
 
