@@ -7,11 +7,11 @@ This is the PVcircuit Package.
 import copy
 import math  # simple math
 from time import time
-from typing import List
+from typing import List, Optional
 
-import matplotlib as mpl  # plotting
 import matplotlib.pyplot as plt  # plotting
 import numpy as np  # arrays
+from loguru import logger
 from scipy.interpolate import interp1d
 from scipy.optimize import brentq  # root finder
 
@@ -28,7 +28,7 @@ class Tandem3T(object):
 
     update_now = True
 
-    def __init__(self, name="Tandem3T", TC: float = junction.TC_REF, Rz: float = 1, Eg_list: List[float] = None, pn: List[float] = None, Jext: float = 0.014):
+    def __init__(self, name="Tandem3T", TC: float = junction.TC_REF, Rz: float = 1, Eg_list: Optional[List[float]] = None, pn: Optional[List[int]] = None, Jext: float = 0.014):
         # user inputs
         # default s-type n-on-p
 
@@ -587,14 +587,15 @@ class Tandem3T(object):
         # plot if possible
         pltargs = {"lw": 0, "ms": 7, "mew": 1, "mec": "black", "marker": "o", "zorder": 5}
         pltargs["label"] = name
+        ckwargs = {}  # color kwargs shared between the V and I axes
         if self.Vax:
             ln = lnout.addpoints(self.Vax, "VA", "VB")  # let cycler choose color
-            c = ln.get_color()
-            MPP.addpoints(self.Vax, "VA", "VB", c=c, **pltargs)
+            ckwargs = {"c": ln.get_color()}
+            MPP.addpoints(self.Vax, "VA", "VB", **ckwargs, **pltargs)
             # self.Vax.legend()
         if self.Iax:
-            lnout.addpoints(self.Iax, "IA", "IB", c=c)
-            MPP.addpoints(self.Iax, "IA", "IB", c=c, **pltargs)
+            lnout.addpoints(self.Iax, "IA", "IB", **ckwargs)
+            MPP.addpoints(self.Iax, "IA", "IB", **ckwargs, **pltargs)
             # self.Iax.legend()
 
         return lnout, MPP
@@ -653,13 +654,14 @@ class Tandem3T(object):
         # plot if possible
         pltargs = {"lw": 0, "ms": 7, "mew": 1, "mec": "black", "marker": "o", "zorder": 5}
         pltargs["label"] = name
+        ckwargs = {}  # color kwargs shared between the V and I axes
         if self.Vax:
             ln = lnout.addpoints(self.Vax, "VA", "VB", label="ln_" + name)  # let cycler choose color
-            c = ln.get_color()
-            MPP.addpoints(self.Vax, "VA", "VB", c=c, **pltargs)
+            ckwargs = {"c": ln.get_color()}
+            MPP.addpoints(self.Vax, "VA", "VB", **ckwargs, **pltargs)
         if self.Iax:
-            lnout.addpoints(self.Iax, "IA", "IB", c=c, label="ln_" + name)
-            MPP.addpoints(self.Iax, "IA", "IB", c=c, **pltargs)
+            lnout.addpoints(self.Iax, "IA", "IB", label="ln_" + name, **ckwargs)
+            MPP.addpoints(self.Iax, "IA", "IB", **ckwargs, **pltargs)
 
         return lnout, MPP
 
@@ -742,7 +744,8 @@ class Tandem3T(object):
                 ax.plot(Vmpr, Impr * pnr, marker="o")
                 print(i, "R", Vmpr, Impr, Pmpr)
 
-            if (Pmpr - Pmpo) / Pmpr < tol:
+            # guard Pmpr == 0 (e.g. dark device): no power to converge on
+            if Pmpr != 0.0 and (Pmpr - Pmpo) / Pmpr < tol:
                 break
             Pmpo = Pmpr
             # VorI = "I"  # switch to 'I' after first iteration
@@ -871,7 +874,7 @@ class Tandem3T(object):
 
     def VIpoint(self, zerokey, varykey, crosskey, meastype="CZ", pnts=11, bplot=False):
         """
-        absolete! use VI0 for point only
+        obsolete! use VI0 for point only
         solve for mixed (V=0, I=0) zero power points
         using a constrained line
         """
@@ -942,7 +945,7 @@ class Tandem3T(object):
 
         te = time()
         dt = te - ts
-        print("VIpoint: " + pt.name + " {0:d}pnts , {1:2.4f} s".format(pnts, dt))
+        logger.info("VIpoint: {} {}pnts, {:.4f} s", pt.name, pnts, dt)
 
         return pt
 
