@@ -151,3 +151,11 @@ Share/
 
 # out files
 *.out
+
+# local working docs (plans, specs) - not versioned
+docs/
+
+# Claude / AI assistant files
+.claude/
+.claudeignore
+CLAUDE*.md
