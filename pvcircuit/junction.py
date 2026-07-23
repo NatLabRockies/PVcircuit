@@ -16,7 +16,7 @@ from typing import List, Optional, Union
 import warnings
 
 import numpy as np  # arrays
-import scipy.constants as con  # physical constants
+from loguru import logger
 from parse import parse
 from scipy.integrate import quad  # numerical integration for non-Gaussian band tails
 from scipy.optimize import brentq  # root finder
@@ -39,7 +39,8 @@ VTOL = 0.0001
 EPSREL = 1e-15
 MAXITER = 1000
 
-GITpath = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+# repository root (parent of the pvcircuit package directory); pvc_output is created here
+GITpath = os.path.dirname(os.path.dirname(__file__))
 
 @lru_cache(maxsize=100)
 def Jdb(TC: float, Eg: float, sigma: float = 0, theta: float = 2.0):
@@ -158,7 +159,7 @@ class Junction(object):
     Class for PV junctions.
     """
 
-    ATTR = ["Eg", "TC", "Gsh", "Rser", "area", "lightarea", "totalarea", "Jext", "JLC", "beta", "gamma", "theta", "pn", "Jphoto", "TK", "Jdb", "RBB"]
+    ATTR = ["Eg", "sigma", "TC", "Gsh", "Rser", "area", "lightarea", "totalarea", "Jext", "JLC", "beta", "gamma", "theta", "pn", "Jphoto", "TK", "Jdb", "RBB"]
     ARY_ATTR = ["n", "J0ratio", "J0"]
     # Internal numerical-stability factor (mA/cm^2). With ``Jdb ~ 1e-26`` and
     # ``J0 ~ 1e-21`` the ratio ``J0/Jdb^(1/n)`` would otherwise span ~20 orders
@@ -186,7 +187,7 @@ class Junction(object):
         Gsh: float = 0.0,
         Rser: float = 0.0,
         area: float = AREA_DEFAULT,
-        n: List[float] = [1.0, 2.0],
+        n: Optional[List[float]] = None,
         J0ratio: Optional[Union[List[float], np.ndarray]] = None,
         J0ref: Optional[Union[List[float], np.ndarray]] = None,
         RBB: Optional[str] = None,
@@ -222,19 +223,22 @@ class Junction(object):
 
         # multiple diodes
         # n=1 bulk, n=m SNS, and n=2/3 Auger mechanisms
+        if n is None:
+            n = [1.0, 2.0]
         ndiodes = len(n)
         self.n = np.array(n)  # diode ideality list e.g. [n0, n1]
-        if J0ref:  # input list of absolute J0
+        # 'is not None' rather than truthiness: numpy arrays raise on bool()
+        if J0ref is not None and len(J0ref) > 0:  # input list of absolute J0
             if len(J0ref) == ndiodes:  # check length
                 self._J0init(J0ref)  # calculate self.J0ratio from J0ref at current self.TC
             else:
-                print("J0ref mismatch", ndiodes, len(J0ref))
+                logger.warning("J0ref length {} does not match number of diodes {}; using default J0ratio", len(J0ref), ndiodes)
                 self.J0ratio = np.full_like(n, J0default)  # default J0ratio
-        elif J0ratio:  # input list of relative J0 ratios
+        elif J0ratio is not None and len(J0ratio) > 0:  # input list of relative J0 ratios
             if len(J0ratio) == ndiodes:  # check length
                 self.J0ratio = np.array(J0ratio)  # diode J0/Jdb^(1/n) ratio list for T dependence
             else:
-                print("J0ratio mismatch", ndiodes, len(J0ratio))
+                logger.warning("J0ratio length {} does not match number of diodes {}; using default J0ratio", len(J0ratio), ndiodes)
                 self.J0ratio = np.full_like(n, J0default)  # default J0ratio
         else:  # create J0ratio
             self.J0ratio = np.full_like(n, J0default)  # default J0ratio
@@ -276,10 +280,8 @@ class Junction(object):
         strout += "\n {0:^5s} {1:^10s} {2:^10s}".format("n", "J0ratio", "J0(A/cm^2)")
         strout += "\n {0:^5s} {1:^10.0f} {2:^10.3e}".format("db", 1.0, self.Jdb)
 
-        i = 0
         for i, _ in enumerate(self.n):
             strout += "\n {0:^5.2f} {1:^10.2f} {2:^10.3e}".format(self.n[i], self.J0ratio[i], self.J0[i])
-            i += 1
 
         if self.RBB_dict["method"]:
             strout += " \nRBB_dict: " + str(self.RBB_dict)
@@ -415,11 +417,8 @@ class Junction(object):
             # raise error if the key is not in the class attributes
             elif key not in list(self.__dict__.keys()):
                 raise ValueError(f"invalid class attribute {key}")
-                # with self.debugout:
-                #     print("ATTR", key, value)
-            # else:
-            #     with self.debugout:
-            #         print("no Junckey", key)
+            else:
+                logger.warning("Junction.set: attribute {!r} exists but is not settable via set(); value ignored", key)
 
         # Boundary-condition check: the photocurrent property scales as
         # Jphoto = Jext * lightarea / totalarea + JLC, so lightarea must

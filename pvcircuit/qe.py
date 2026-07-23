@@ -9,26 +9,21 @@ from __future__ import annotations
 import math  # simple math
 from enum import Enum
 from functools import lru_cache
-from pathlib import Path
-from time import time
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 import matplotlib as mpl  # plotting
 import matplotlib.pyplot as plt  # plotting
 import numpy as np  # arrays
 import pandas as pd  # dataframes
-
-# from scipy.integrate import trapezoid
 from scipy import constants  # physical constants
 from scipy.integrate import trapezoid
-from scipy.interpolate import RegularGridInterpolator, UnivariateSpline, interp1d
+from scipy.interpolate import UnivariateSpline, interp1d
 from scipy.optimize import (
-    brentq,  # root finder
     curve_fit,
     fsolve,
     least_squares,
 )
-from scipy.special import erfc, gamma, gammaincc, lambertw  # special functions
+from scipy.special import gammaincc  # special functions
 
 import pvcircuit as pvc
 from pvcircuit import conversions as convert
@@ -64,16 +59,16 @@ ASTMfile = pvc.datapath.joinpath("ASTMG173.csv")
 
 try:
     dfrefspec = pd.read_csv(ASTMfile, index_col=0, header=2)
-    wvl = dfrefspec.index.to_numpy(dtype=np.float64, copy=True)
-    refspec = dfrefspec.to_numpy(dtype=np.float64, copy=True)  # all three reference spectra
-    refnames = ["space", "global", "direct"]
-    AM0 = refspec[:, 0]  # dfrefspec['space'].to_numpy(dtype=np.float64, copy=True)  # 1348.0 W/m2
-    AM15G = refspec[:, 1]  # dfrefspec['global'].to_numpy(dtype=np.float64, copy=True) # 1000.5 W/m2
-    AM15D = refspec[:, 2]  # dfrefspec['direct'].to_numpy(dtype=np.float64, copy=True) # 900.2 W/m2
-except Exception:
-    print(pvc.pvcpath)
-    print(pvc.datapath)
-    print(ASTMfile)
+except Exception as err:
+    # Fail if the reference don't exist
+    raise RuntimeError(f"Cannot read ASTM reference spectra from {ASTMfile} (pvcpath={pvc.pvcpath}, datapath={pvc.datapath})") from err
+
+wvl = dfrefspec.index.to_numpy(dtype=np.float64, copy=True)
+refspec = dfrefspec.to_numpy(dtype=np.float64, copy=True)  # all three reference spectra
+refnames = ["space", "global", "direct"]
+AM0 = refspec[:, 0]  # dfrefspec['space'].to_numpy(dtype=np.float64, copy=True)  # 1348.0 W/m2
+AM15G = refspec[:, 1]  # dfrefspec['global'].to_numpy(dtype=np.float64, copy=True) # 1000.5 W/m2
+AM15D = refspec[:, 2]  # dfrefspec['direct'].to_numpy(dtype=np.float64, copy=True) # 900.2 W/m2
 
 
 def ordinal(n: int) -> str:
@@ -91,10 +86,10 @@ def _eq_solve_Eg(Eg: float, *data: np.ndarray) -> float:
 
 
 def _gaussian(x: np.ndarray, a: float, x0: float, sigma: float) -> np.ndarray:
-    return 1 * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
+    return a * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
 
 
-def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[float]], TC: float, Eguess: float = 1.0, kTfilter: int = 3, bplot: bool = False) -> Union[Tuple[np.ndarray, np.ndarray], str]:
+def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[float]], TC: float, Eguess: float = 1.0, kTfilter: int = 3, bplot: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """
     calculate detailed-balance reverse saturation current
     from EQE vs xEQE
@@ -109,7 +104,7 @@ def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[floa
     elif EQE.ndim == 2:  # 2D EQE[lambda, junction]
         nQlams, njuncs = EQE.shape
     else:
-        return "dims in EQE:" + str(EQE.ndim)
+        raise ValueError(f"EQE must be 1D or 2D, got ndim={EQE.ndim}")
 
     Eguess_arr = np.array([Eguess] * njuncs)
 
@@ -125,9 +120,9 @@ def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[floa
         # step = xEQE[1]-xEQE[0]  #first step
 
     if xEQE.ndim != 1:  # need 1D with same length as EQE(lam)
-        return "dims in xEQE:" + str(xEQE.ndim) + "!=1"
+        raise ValueError(f"xEQE must be 1D, got ndim={xEQE.ndim}")
     elif len(xEQE) != nQlams:
-        return "nQlams:" + str(len(xEQE)) + "!=" + str(nQlams)
+        raise ValueError(f"length of xEQE ({len(xEQE)}) does not match EQE rows ({nQlams})")
 
     Egvect = np.vectorize(EgFromJdb)
     EkT = nm2eV / Vthlocal / xEQE
@@ -163,12 +158,12 @@ def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[floa
     return Jdb, Egnew
 
 
-def PintMD(Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> Union[np.ndarray, str]:
+def PintMD(Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> np.ndarray:
     # optical power of spectrum over full range
     return JintMD(None, None, Pspec, xspec)
 
 
-def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], None], Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> Union[np.ndarray, str]:
+def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], None], Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> np.ndarray:
     """
     integrate over spectrum or spectra
     if EQE is None -> calculate Power in [W/m2]
@@ -210,7 +205,7 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
     elif Pspec.ndim == 2:  # 2D Pspec[lambda, ispec]
         nSlams, nspecs = Pspec.shape
     else:
-        return "dims in Pspec:" + str(Pspec.ndim)
+        raise ValueError(f"Pspec must be 1D or 2D, got ndim={Pspec.ndim}")
 
     # check EQE input
     EQE = np.array(EQE)  # ensure numpy
@@ -227,7 +222,7 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
     elif EQE.ndim == 2:  # 2D EQE[lambda, junction]
         nQlams, njuncs = EQE.shape
     else:
-        return "dims in EQE:" + str(EQE.ndim)
+        raise ValueError(f"EQE must be scalar, 1D or 2D, got ndim={EQE.ndim}")
 
     # check x range input
     xEQE = np.array(xEQE, dtype=np.float64)
@@ -240,22 +235,22 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
         if nxEQE == 2:  # evenly spaced x-values (start, stop)
             xEQE = np.linspace(start, stop, max(nQlams, 2), dtype=np.float64)
     else:
-        return "dims in xEQE:" + str(xEQE.ndim)
+        raise ValueError(f"xEQE must be 1D, got ndim={xEQE.ndim}")
 
     if nQlams == 1:
         EQE = np.full_like(xEQE, EQE)
 
     if xspec.ndim != 1:  # need 1D with same length as Pspec(lam)
-        return "dims in xspec:" + str(xspec.ndim) + "!=1"
+        raise ValueError(f"xspec must be 1D, got ndim={xspec.ndim}")
     elif len(xspec) != nSlams:
-        return "nSlams:" + str(len(xspec)) + "!=" + str(nSlams)
+        raise ValueError(f"length of xspec ({len(xspec)}) does not match Pspec rows ({nSlams})")
 
     if xEQE.ndim != 1:  # need 1D with same length as EQE(lam)
-        return "dims in xEQE:" + str(xEQE.ndim) + "!=1"
+        raise ValueError(f"xEQE must be 1D, got ndim={xEQE.ndim}")
     elif nQlams == 1:
         pass
     elif len(xEQE) != nQlams:
-        return "nQlams:" + str(len(xEQE)) + "!=" + str(nQlams)
+        raise ValueError(f"length of xEQE ({len(xEQE)}) does not match EQE rows ({nQlams})")
 
     # find start and stop index  of nSlams
     n0 = 0
@@ -314,7 +309,7 @@ def JdbFromEg(TC: float, Eg: float, dbsides: float = 1.0, method: Union[str, Non
     EgkT = Eg / convert.Vth(TC)
     TKlocal = convert.TK(TC)
 
-    if str(method).lower == "gamma":
+    if str(method).lower() == "gamma":
         # use special function incomplete gamma
         # gamma(3)=2.0 not same incomplete gamma as in Igor
         Jdb = DB_PREFIX * TKlocal**3.0 * gammaincc(3.0, EgkT) * 2.0 * dbsides
@@ -536,19 +531,26 @@ class EQE(object):
             # p_ab = thres * y_diff_max
             # find the index of the low-energy side where P(a) is max(P(Eg)/2)
             a_cond = np.where((y_grad < p_ab) & (x < x_diff_max))[0]
-            if len(a_cond > 0):
+            if len(a_cond) > 0:
                 a_idx = np.nanmin(a_cond)
             else:
                 a_idx = len(x) - 1
             a = x[a_idx]
             p_a = y_grad[a_idx]
             # find the index of the high-energy side where P(b) is max(P(Eg)/2)
-            b_idx = np.nanmax(np.where((y_grad < p_ab) & (x > x_diff_max))[0])
+            b_cond = np.where((y_grad < p_ab) & (x > x_diff_max))[0]
+            if len(b_cond) > 0:
+                b_idx = np.nanmax(b_cond)
+            else:
+                b_idx = 0
             b = x[b_idx]
             p_b = y_grad[b_idx]
 
-            x_target = x[a_idx : b_idx - 1 : -1]
-            y_target = y_grad[a_idx : b_idx - 1 : -1]
+            # reversed slice from a_idx down to (and including) b_idx;
+            # a stop of b_idx - 1 == -1 would silently produce an empty slice
+            stop = b_idx - 1 if b_idx > 0 else None
+            x_target = x[a_idx:stop:-1]
+            y_target = y_grad[a_idx:stop:-1]
 
             if fit_gaussian:
                 # initial guesses from weighted arithmetic mean and weighted sample sigma
@@ -643,13 +645,15 @@ class EQE(object):
             DBintegral = blackbody * EQEfilter
             Jdb = trapezoid(DBintegral, x=(self.wavelength * 1e-9), axis=0)
             Egnew = Egvect(TC, Jdb)
+            # store on every iteration so Egs is set even when the loop
+            # converges on the first pass
+            self.Egs = Egnew
             if dbug:
                 print(Egnew, max((Egnew - Eguess_arr) / Egnew))
             if np.amax((Egnew - Eguess_arr) / Egnew) < 1e-6:
                 break
             else:
                 Eguess_arr = Egnew
-            self.Egs = Egnew
 
         return Jdb, Egnew
 
@@ -777,8 +781,7 @@ class EQET(EQE):
         self.corrEQE = self.corrEQE[:, temperature_sorter]
 
     def _qe_from_model(self, temperature: np.ndarray) -> "EQET":
-
-        pass  # pass for now
+        raise NotImplementedError("EQET method 'model' is not implemented yet; use method='interpolate'")
 
     # def controls(self, Pspec='global', ispec=0, specname=None, xspec=wvl):
     #     '''
@@ -1066,7 +1069,8 @@ class EQET(EQE):
         Returns:
             np.ndarray: spectral response data
         """
-        sr = self.eqe.T / np.asarray(convert.photonenergy_to_wavelength(self.wavelength.flatten()))
+        # SR [A/W] = EQE / E_photon[eV]; wavelength_to_photonenergy converts nm -> eV
+        sr = self.eqe.T / np.asarray(convert.wavelength_to_photonenergy(self.wavelength.flatten()))
         return sr.T
 
     def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: Union[float, np.ndarray] = 25, sjuncs: Union[str, None] = None) -> None:  # ty: ignore[invalid-method-override]

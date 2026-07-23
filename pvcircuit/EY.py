@@ -5,21 +5,15 @@ Package to simulate energy yield
 
 import copy
 import multiprocessing as mp
-import warnings
-from functools import lru_cache
 from typing import List, Optional, Tuple, Union
 
 import numpy as np  # arrays
 import pandas as pd
-from parse import parse
 from scipy import constants
 from scipy.integrate import trapezoid
-from scipy.special import erfc
-from tqdm import tqdm, trange
+from tqdm import tqdm
 
 import pvcircuit as pvc
-
-# warnings.warn("The 'EY.py' module is deprecated and will be change in future version.", DeprecationWarning, stacklevel=2)
 
 
 def VMloss(model: Union["pvc.Tandem3T", "pvc.Multi2T"], oper: str, ncells: int) -> float:
@@ -112,18 +106,23 @@ def sandia_T(poa_global: Union[float, np.ndarray, pd.Series], wind_speed: Union[
     return temp_cell
 
 
-def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, TempCell: pd.Series, devlist: Union[List[Union["pvc.Multi2T", "pvc.Tandem3T"]], np.ndarray], oper: str) -> pd.DataFrame:
+def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, TempCell: pd.Series, model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str) -> pd.DataFrame:
+    """Evaluate IV parameters for one chunk of timesteps on a single device copy.
+
+    The same model instance is reused for every row: each iteration overwrites
+    all state that varies between rows (Eg, sigma, Jext, TC), so no state leaks
+    from one timestep to the next.
+    """
 
     columns: list[str] = ["Voc", "Isc", "Vmp", "Imp", "Pmp"]
     IV_params = pd.DataFrame(np.zeros((len(Jscs), len(columns))), columns=columns)
 
     for i in range(len(Jscs)):
-        model = devlist[i]
         if isinstance(model, pvc.Multi2T):  # Multi2T or current matched 2-junction tandem
             for ijunc in range(model.njuncs):
                 # Jscs is stored in mA/cm^2 (Meteo.add_currents); junction.Jext
                 # expects A/cm^2, so divide by 1000.
-                model.j[ijunc].set(Eg=Egs[i, ijunc], Jext=Jscs[i, ijunc] / 1e3, TC=TempCell.iloc[i])
+                model.j[ijunc].set(Eg=Egs[i, ijunc], sigma=sigmas[i, ijunc], Jext=Jscs[i, ijunc] / 1e3, TC=TempCell.iloc[i])
 
             mpp_dict = model.MPP()
             # Pmax = mpp_dict["Pmp"]
@@ -149,8 +148,7 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
                 model.bot.pn = -1 * model.top.pn if tandem_type[2] == "r" else 1 * model.top.pn
                 ln, iv3T = model.VM(*map(int, tandem_type[1]))
             else:
-                iv3T = pvc.iv3T.IV3T("bogus", shape=1)
-                iv3T.Ptot[0] = 0
+                raise ValueError(f"Unknown 3T operation mode: {oper!r}")
             assert isinstance(iv3T, pvc.iv3T.IV3T)
             IV_params.loc[i, "Vmp"] = iv3T.VA - iv3T.VB
             IV_params.loc[i, "Imp"] = min(abs(iv3T.IA), abs(iv3T.IB))
@@ -163,8 +161,7 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
             IV_params.loc[i, "Isc"] = min(abs(iv3T.IA), abs(iv3T.IB))
 
         else:
-            for col in columns:
-                IV_params.loc[i, col] = 0
+            raise ValueError(f"Unknown model type: {type(model).__name__}")
 
     return IV_params  # Pmax in [W]
 
@@ -296,9 +293,10 @@ class Meteo:
         chunk_ids = np.arange(len(self.jscs))
         chunk_size = min(len(chunk_ids) // cpu_count + 1, max_chunk_size)
 
-        # Create chunks of data for parallel processing
+        # Create chunks of data for parallel processing. One deep copy of the
+        # device per chunk is enough: _calc_yield_async overwrites all
+        # row-varying state (Eg, sigma, Jext, TC) on every iteration.
         chunks = [chunk_ids[i : i + chunk_size] for i in range(0, len(chunk_ids), chunk_size)]
-        dev_list = np.array([copy.deepcopy(model) for _ in range(len(self.jscs))])
 
         with tqdm(total=len(self.datetime), leave=True) as pbar:
 
@@ -315,7 +313,7 @@ class Meteo:
                     # Assign tasks to multiprocessing pool
                     # For multiprocessing
                     jobs = [
-                        pool.apply_async(_calc_yield_async, args=(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], dev_list[chunk], oper), callback=update_tqdm)
+                        pool.apply_async(_calc_yield_async, args=(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], copy.deepcopy(model), oper), callback=update_tqdm)
                         for chunk in chunks
                     ]
                     # Collect and combine dataframe results
@@ -328,7 +326,7 @@ class Meteo:
                 result_dfs = []
                 for i, chunk in enumerate(chunks):
                     # Process each chunk sequentially
-                    chunk_result = _calc_yield_async(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], dev_list[chunk], oper)
+                    chunk_result = _calc_yield_async(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], copy.deepcopy(model), oper)
                     result_dfs.append(chunk_result)
                     pbar.update(len(chunk))
                     pbar.refresh()
@@ -372,6 +370,39 @@ class Meteo:
         # Compute average photon energy
         self.average_photon_energy = trapezoid(x=self.wavelength, y=self.spectra.values) / constants.e / trapezoid(x=self.wavelength, y=phi.values)
 
+    def _recompute_energy_in(self) -> None:
+        """Recompute the integrated energy input from the current (filtered) rows."""
+        if len(self.datetime) == 0:
+            self.energy_in = 0.0
+            return
+        self.energy_in = trapezoid(y=self.irradiance, x=(self.datetime - self.datetime[0]).total_seconds()) / 3600 / 1000  # [kWh/m^2/yr]
+
+    def _apply_row_mask(self, mask: np.ndarray) -> "Meteo":
+        """
+        Return a deep copy with a boolean row mask applied to every
+        row-aligned attribute (meteorological series and any added
+        jsc/bandgap/sigma arrays), and energy_in recomputed.
+        """
+        self_copy = copy.deepcopy(self)
+
+        self_copy.datetime = self_copy.datetime[mask]
+        self_copy.temp = self_copy.temp[mask]
+        self_copy.wind = self_copy.wind[mask]
+        self_copy.spectra = self_copy.spectra[mask]
+        self_copy.irradiance = self_copy.irradiance[mask]
+        self_copy.cell_temp = self_copy.cell_temp[mask]
+        if self_copy.average_photon_energy is not None:
+            self_copy.average_photon_energy = self_copy.average_photon_energy[mask]
+        for attr_name in ("jscs", "bandgaps", "sigmas"):
+            attr = getattr(self_copy, attr_name)
+            if attr is not None:
+                setattr(self_copy, attr_name, attr[mask])
+
+        # energy_in was integrated over the unfiltered rows; recompute so
+        # run_ey efficiency on the filtered copy is normalised correctly.
+        self_copy._recompute_energy_in()
+        return self_copy
+
     def filter_ape(self, min_ape: float = 0, max_ape: float = 10) -> "Meteo":
         """
         Filter the average photon energy (APE) within specified bounds.
@@ -385,22 +416,11 @@ class Meteo:
         """
         if self.average_photon_energy is None:
             self.calc_ape()
+        assert self.average_photon_energy is not None
 
-        self_copy = copy.deepcopy(self)
-        assert self_copy.average_photon_energy is not None
-        # Create a mask based on APE criteria
-        ape_mask = (self_copy.average_photon_energy > min_ape) & (self_copy.average_photon_energy < max_ape)
-
-        # Apply the mask to relevant attributes
-        self_copy.datetime = self_copy.datetime[ape_mask]
-        self_copy.average_photon_energy = self_copy.average_photon_energy[ape_mask]
-        self_copy.spectra = self_copy.spectra[ape_mask]
-        self_copy.irradiance = self_copy.irradiance[ape_mask]
-        self_copy.cell_temp = self_copy.cell_temp[ape_mask]
-
-        # Ensure all filtered attributes have the same length
-        assert len(self_copy.spectra) == len(self_copy.irradiance) == len(self_copy.cell_temp) == len(self_copy.average_photon_energy)
-        return self_copy
+        # NaN APE rows (all-zero spectra) compare False and are dropped
+        ape_mask = (self.average_photon_energy > min_ape) & (self.average_photon_energy < max_ape)
+        return self._apply_row_mask(np.asarray(ape_mask))
 
     def filter_spectra(self, min_spectra: float = 0, max_spectra: float = 10) -> "Meteo":
         """
@@ -413,20 +433,8 @@ class Meteo:
         Returns:
             Meteo: A new Meteo instance with filtered spectral data.
         """
-        self_copy = copy.deepcopy(self)
-        # Create a mask based on spectral criteria
-        spectra_mask = (self_copy.spectra >= min_spectra).all(axis=1) & (self_copy.spectra < max_spectra).all(axis=1)
-        # Apply the mask to relevant attributes
-        self_copy.datetime = self_copy.datetime[spectra_mask]
-        if self_copy.average_photon_energy is not None:
-            self_copy.average_photon_energy = self_copy.average_photon_energy[spectra_mask]
-        self_copy.spectra = self_copy.spectra[spectra_mask]
-        self_copy.irradiance = self_copy.irradiance[spectra_mask]
-        self_copy.cell_temp = self_copy.cell_temp[spectra_mask]
-
-        # Ensure all filtered attributes have the same length
-        assert len(self_copy.spectra) == len(self_copy.irradiance) == len(self_copy.cell_temp)
-        return self_copy
+        spectra_mask = (self.spectra >= min_spectra).all(axis=1) & (self.spectra < max_spectra).all(axis=1)
+        return self._apply_row_mask(np.asarray(spectra_mask))
 
     def filter_custom(self, filter_array: np.ndarray) -> "Meteo":
         """
@@ -438,18 +446,16 @@ class Meteo:
         Returns:
             Meteo: A new Meteo instance with custom-filtered data.
         """
-        # assert len(filter_array) == len(self.spectra) == len(self.SpecPower) == len(self.TempCell)
-
         self_copy = copy.deepcopy(self)
 
-        # Apply the filter to all relevant attributes
+        # Apply the filter to all row-aligned attributes
         for attr_name in vars(self):
             if hasattr(getattr(self_copy, attr_name), "__len__"):
                 attr = getattr(self_copy, attr_name)
                 if len(attr) == len(filter_array):
                     setattr(self_copy, attr_name, attr[filter_array])
 
-        # assert len(self.spectra) == len(self.SpecPower) == len(self.TempCell) == len(self.average_photon_energy)
+        self_copy._recompute_energy_in()
         return self_copy
 
     def reindex(self, index: pd.Index, method: str = "nearest", tolerance: Optional[pd.Timedelta] = None) -> "Meteo":
