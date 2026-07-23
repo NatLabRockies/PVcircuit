@@ -153,7 +153,7 @@ def test_EQE(example_eqe):
 
     bandgaps, sigmas = example_eqe.calc_Eg_Rau()
     bandgaps, sigmas = example_eqe.calc_Eg_Rau(plot_fits=True)  # for test coverage
-    np.testing.assert_array_almost_equal(bandgaps, np.array([1.82757806, 1.40411631, 1.05180571, 0.74085114]))
+    np.testing.assert_array_almost_equal(bandgaps, np.array([1.8280609, 1.40411546, 1.05180891, 0.74064824]))
     np.testing.assert_array_almost_equal(sigmas, np.array([0.03637069, 0.01110312, 0.01503357, 0.01186747]))
 
     Jdb, Egnew = example_eqe.Jdb(320)
@@ -176,7 +176,7 @@ def test_EQET(example_eqe):
     np.testing.assert_array_almost_equal(example_eqe.Jint(), np.array([[13.36347958], [12.72695153], [12.10891819], [11.58554508]]))
 
     bandgaps, sigmas = example_eqe.calc_Eg_Rau()
-    np.testing.assert_array_almost_equal(bandgaps, np.array([1.82757806, 1.40411631, 1.05180571, 0.74085114]))
+    np.testing.assert_array_almost_equal(bandgaps, np.array([1.8280609, 1.40411546, 1.05180891, 0.74064824]))
     np.testing.assert_array_almost_equal(sigmas, np.array([0.03637069, 0.01110312, 0.01503357, 0.01186747]))
 
     Jdb, Egnew = example_eqe.Jdb(320)

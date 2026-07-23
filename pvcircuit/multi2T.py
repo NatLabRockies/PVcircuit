@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import copy
 import math  # simple math
-import os
 from time import time
+from typing import List, Optional, Union
 
 import matplotlib.pyplot as plt  # plotting
 import numpy as np  # arrays
-import pandas as pd
+from loguru import logger
 from scipy.optimize import root, root_scalar
 
 from pvcircuit import junction
@@ -48,10 +48,10 @@ class Multi2T(object):
         Rs2T: float = 0.0,
         area: float = 1.0,
         Jext: float = 0.014,
-        Eg_list: list[float] = None,
-        n: list[int] = None,
-        J0ratio: float = None,
-        J0ref: float = None,
+        Eg_list: Optional[List[float]] = None,
+        n: Optional[List[float]] = None,
+        J0ratio: Optional[Union[List[float], np.ndarray]] = None,
+        J0ref: Optional[Union[List[float], np.ndarray]] = None,
     ):
         # user inputs
         # note n and J0ratio much be same size
@@ -377,7 +377,7 @@ class Multi2T(object):
                 raise ValueError
             return I_solution.root
         except ValueError as err:
-            print(f"root_scalar failed {err}. Fall back to root")
+            logger.warning("root_scalar failed ({}); falling back to root", err)
             I_solution = root(self._I2T_root_target, x0=initial_guess, args=(V,), method="lm", tol=1e-15, options={"xtol": 1e-15, "ftol": 1e-15, "maxiter": 10000, "factor": 0.1})
             if np.isfinite(I_solution.x):
                 return I_solution.x[0]
