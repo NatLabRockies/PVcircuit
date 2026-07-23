@@ -125,6 +125,7 @@ dependencies = [
     "ipywidgets",
     "ipympl",
     "jupyter",
+    "loguru",
     "parse",
     "pvlib",
 
@@ -222,3 +223,14 @@ show_missing = true # shows lines without coverage
 [tool.coverage.html]
 directory = "htmlcov"  # HTML output directory
 title = "PVcircuit coverage report"
+
+[tool.uv.workspace]
+members = ["../NREL_measurement_data_evaluation"]
+
+[tool.uv.sources]
+nrel-measurement-data-evaluation = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "nrel-measurement-data-evaluation",
+]

@@ -10,11 +10,11 @@ import os
 import re
 from typing import Any
 
-import matplotlib as mpl
 import matplotlib.pyplot as plt  # plotting
 from matplotlib.legend import Legend
 import numpy as np  # arrays
 import pandas as pd  # data frames
+from loguru import logger
 
 # conversion matrices
 SQ2 = math.sqrt(2.0)
@@ -76,8 +76,9 @@ class IV3T(object):
     """Operational state of a 3-terminal tandem.
 
     All array attributes have the same shape (set at construction). A scalar
-    shape of 0 produces 0-d arrays, (N,) produces line scans, and a
-    tuple such as (N, M) produces a 2-d operating grid.
+    shape of 0 produces empty 1-d arrays (size 0, used as seeds for
+    append), (N,) produces line scans, and a tuple such as (N, M)
+    produces a 2-d operating grid.
 
     Units and conventions
     ---------------------
@@ -300,8 +301,10 @@ class IV3T(object):
                 setattr(self, key, np.full(shape, np.nan, dtype=np.float64))
 
         y = eval(yconstraint)
-        if type(y) is not np.array:
+        if not isinstance(y, np.ndarray):
             y = np.full(shape, y, dtype=np.float64)
+        else:
+            y = np.asarray(y, dtype=np.float64)
 
         setattr(self, ykey, y)
         self.kirchhoff([xkey, ykey])  # calculate everything
@@ -475,7 +478,7 @@ class IV3T(object):
             array = getattr(self, key)
             oldarray = np.copy(array)
             if oldarray.ndim > 1:
-                print("too many dimensions", oldarray.ndim)
+                logger.warning("delete: too many dimensions ({}) in {}", oldarray.ndim, key)
             newarray = np.delete(oldarray, ind, 0)
             setattr(self, key, newarray)
 
@@ -488,14 +491,14 @@ class IV3T(object):
         if nmin == nmax:  # everything in inlist has same length
             self.shape = self.Ptot.shape
         else:
-            print("not all same size", nmin, nmax)
+            logger.warning("delete: arrays not all same size ({}, {})", nmin, nmax)
 
     def append(self, iv3T):
         # append another iv3T object to self
 
         nmin, nmax = self.sizes(self.arraykeys)
         if nmin != nmax:
-            print(nmin, nmax, "not same size")
+            logger.warning("append: arrays not same size ({}, {})", nmin, nmax)
             return 1
         addmin, addmax = iv3T.sizes(self.arraykeys)
         newsize = nmax + addmax
@@ -595,7 +598,7 @@ class IV3T(object):
                         array2.flat[i] = np.nan
 
         else:
-            print(str(two) + " arrays not same length")
+            logger.warning("kirchhoff: {} arrays not same length", two)
             return 3  # klist arrays not same length
 
         return 0  # success
@@ -682,7 +685,7 @@ class IV3T(object):
             loadlist = ["IA", "IB"]
             hexlist = ["Ixhex", "Iyhex"]
         else:
-            print("VorI err", VorI)
+            logger.warning("convert: invalid VorI {!r}", VorI)
             return 1  # invalid VorI
 
         if meastype is not None:  # change the attribute here
@@ -713,13 +716,13 @@ class IV3T(object):
             inlist = devlist
             outlist = loadlist
         else:
-            print("oper err", oper)
+            logger.warning("convert: invalid oper {!r}", oper)
             return 2  # invalid oper
 
         try:
             matrix = eval(smatrix)
         except Exception:
-            print("matrix err", smatrix)
+            logger.warning("convert: could not evaluate matrix {!r}", smatrix)
             return 3  # could not evaluate smatrix
 
         nmin, nmax = self.sizes(inlist)
