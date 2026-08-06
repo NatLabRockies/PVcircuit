@@ -1,25 +1,24 @@
-# -*- coding: utf-8 -*-
 """
 This is the PVcircuit Package.
 pvcircuit.Junction()
 properties and methods for each junction
 """
+
 from __future__ import annotations
 
 import copy
 import math  # simple math
 import os
+import warnings
 from datetime import datetime
 from functools import lru_cache
 from time import time
-from typing import List, Optional, Union
-import warnings
 
 import numpy as np  # arrays
 from loguru import logger
 from parse import parse
 from scipy.integrate import quad  # numerical integration for non-Gaussian band tails
-from scipy.optimize import brentq  # root finder
+from scipy.optimize import brentq, elementwise  # root finders (scalar and vectorized)
 
 from pvcircuit.conversions import DB_PREFIX, HC_E, K_Q, TK, Vth
 
@@ -31,16 +30,22 @@ SIGMA_DEFAULT = 0  # [eV]
 TC_REF = 25.0  # [C]
 AREA_DEFAULT = 1.0  # [cm^2] note: if A=1, then I->J
 BETA_DEFAULT = 15.0  # unitless
+# [A/cm^2] reference current density that makes J0ratio dimensionless.
+# The value is 1 mA/cm^2, matching the historical PVcircuit/Igor convention.
+J0_REFERENCE = 1e-3
 
 # numerical calculation parameters
 VLIM_REVERSE = 10.0
 VLIM_FORWARD = 3.0
-VTOL = 0.0001
 EPSREL = 1e-15
 MAXITER = 1000
+SCALAR_SOLVE_CUTOFF = 100
+# Voltage tolerance for scalar Brent solves and 3T Brent fallbacks.
+XTOL_SOLVE = 1e-11
 
 # repository root (parent of the pvcircuit package directory); pvc_output is created here
 GITpath = os.path.dirname(os.path.dirname(__file__))
+
 
 @lru_cache(maxsize=100)
 def Jdb(TC: float, Eg: float, sigma: float = 0, theta: float = 2.0):
@@ -85,31 +90,17 @@ def Jdb(TC: float, Eg: float, sigma: float = 0, theta: float = 2.0):
 
     # Detailed balance step (no tail). Both theta branches collapse here.
     if sigma == 0:
-        return DB_PREFIX * TKlocal ** 3.0 * sq_bracket * np.exp(-EgkT)
+        return DB_PREFIX * TKlocal**3.0 * sq_bracket * np.exp(-EgkT)
 
     if theta == 2.0:
         # Mattheis-Rau-Werner Gaussian bandgap-fluctuation closed form.
         # Historical pvcircuit expression, preserved verbatim.
-        return (
-            DB_PREFIX
-            * TKlocal ** 3.0
-            * (
-                sq_bracket
-                - 2 * sigma**2 * Eg / Vthlocal**3
-                - sigma**2 / Vthlocal**2
-                + sigma**4 / Vthlocal**4
-            )
-            * np.exp(-EgkT + sigma**2 / (2 * Vthlocal**2))
-        )
+        return DB_PREFIX * TKlocal**3.0 * (sq_bracket - 2 * sigma**2 * Eg / Vthlocal**3 - sigma**2 / Vthlocal**2 + sigma**4 / Vthlocal**4) * np.exp(-EgkT + sigma**2 / (2 * Vthlocal**2))
 
     # Generalized-Urbach numerical integration.
     if sigma > 3.0 * Vthlocal:
-
         warnings.warn(
-            "Jdb: sigma={:.3g} eV exceeds 3*Vth ({:.3g} eV) at TC={} C. "
-            "Generalized-Urbach result may be unphysical.".format(
-                sigma, 3.0 * Vthlocal, TC
-            ),
+            f"Jdb: sigma={sigma:.3g} eV exceeds 3*Vth ({3.0 * Vthlocal:.3g} eV) at TC={TC} C. Generalized-Urbach result may be unphysical.",
             UserWarning,
             stacklevel=2,
         )
@@ -120,10 +111,10 @@ def Jdb(TC: float, Eg: float, sigma: float = 0, theta: float = 2.0):
     def _integrand(x):
         u = EgkT - x  # = (Eg - E) / Vth, > 0 on the below-Eg interval
         ratio = u * Vthlocal / sigma  # = (Eg - E) / sigma
-        return np.exp(-(ratio ** theta)) * x * x * np.exp(-x)
+        return np.exp(-(ratio**theta)) * x * x * np.exp(-x)
 
     below_eg, _ = quad(_integrand, 0.0, EgkT, limit=200, epsrel=1e-10)
-    return DB_PREFIX * TKlocal ** 3.0 * (np.exp(-EgkT) * sq_bracket + below_eg)
+    return DB_PREFIX * TKlocal**3.0 * (np.exp(-EgkT) * sq_bracket + below_eg)
 
 
 def timestamp(fmt="%y%m%d-%H%M%S", tm=None) -> str:
@@ -134,7 +125,7 @@ def timestamp(fmt="%y%m%d-%H%M%S", tm=None) -> str:
     return date_time.strftime(fmt)
 
 
-def newoutpath(dname: Optional[str] = None) -> Optional[str]:
+def newoutpath(dname: str | None = None) -> str | None:
     # return a new output within pvc_output
     if os.path.exists(GITpath):
         pvcoutpath = os.path.join(GITpath, "pvc_output")
@@ -154,18 +145,212 @@ def newoutpath(dname: Optional[str] = None) -> Optional[str]:
     return None
 
 
-class Junction(object):
+def _saturation_current_from_ratio(Jdb_value, ideality_factor, ratio):
+    """Return saturation current density [A/cm^2] from J0ratio.
+
+    All current densities remain in A/cm^2. J0_REFERENCE appears only to
+    make the fractional-power argument and J0ratio dimensionless. The direct
+    path preserves historical/Igor results.
+    """
+    Jdb_value = np.asarray(Jdb_value, dtype=np.float64)
+    ideality_factor = np.asarray(ideality_factor, dtype=np.float64)
+    ratio = np.asarray(ratio, dtype=np.float64)
+    reference_inverse = 1.0 / J0_REFERENCE
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
+        direct = (Jdb_value * reference_inverse) ** (1.0 / ideality_factor) * ratio / reference_inverse
+        log_magnitude = math.log(J0_REFERENCE) + np.log(np.abs(ratio)) + np.log(Jdb_value / J0_REFERENCE) / ideality_factor
+        stable = np.sign(ratio) * np.exp(log_magnitude)
+        use_stable = ((direct == 0.0) & (stable != 0.0)) | (~np.isfinite(direct) & np.isfinite(stable))
+        return np.where(use_stable, stable, direct)
+
+
+def _ratio_from_saturation_current(Jdb_value, ideality_factor, saturation_current):
+    """Return dimensionless J0ratio from saturation current [A/cm^2]."""
+    Jdb_value = np.asarray(Jdb_value, dtype=np.float64)
+    ideality_factor = np.asarray(ideality_factor, dtype=np.float64)
+    saturation_current = np.asarray(saturation_current, dtype=np.float64)
+    reference_inverse = 1.0 / J0_REFERENCE
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
+        direct = reference_inverse * saturation_current / (Jdb_value * reference_inverse) ** (1.0 / ideality_factor)
+        log_magnitude = np.log(np.abs(saturation_current)) - math.log(J0_REFERENCE) - np.log(Jdb_value / J0_REFERENCE) / ideality_factor
+        stable = np.sign(saturation_current) * np.exp(log_magnitude)
+        use_stable = ((direct == 0.0) & (stable != 0.0)) | (~np.isfinite(direct) & np.isfinite(stable))
+        return np.where(use_stable, stable, direct)
+
+
+def _scaled_expm1(coefficient, exponent):
+    """Evaluate coefficient * expm1(exponent) without intermediate overflow."""
+    coefficient, exponent = np.broadcast_arrays(
+        np.asarray(coefficient, dtype=np.float64),
+        np.asarray(exponent, dtype=np.float64),
+    )
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
+        direct = coefficient * np.expm1(exponent)
+        stable = np.sign(coefficient) * np.exp(np.log(np.abs(coefficient)) + exponent)
+        stable = np.where(coefficient == 0.0, 0.0, stable)
+        use_stable = (exponent > 0.0) & ~np.isfinite(direct) & np.isfinite(stable)
+        return np.where(use_stable, stable, direct)
+
+
+def _scaled_exp(coefficient, exponent):
+    """Evaluate coefficient * exp(exponent) without intermediate range loss."""
+    coefficient, exponent = np.broadcast_arrays(
+        np.asarray(coefficient, dtype=np.float64),
+        np.asarray(exponent, dtype=np.float64),
+    )
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
+        direct = coefficient * np.exp(exponent)
+        stable = np.sign(coefficient) * np.exp(np.log(np.abs(coefficient)) + exponent)
+        stable = np.where(coefficient == 0.0, 0.0, stable)
+        use_stable = ((direct == 0.0) & (stable != 0.0)) | (~np.isfinite(direct) & np.isfinite(stable))
+        return np.where(use_stable, stable, direct)
+
+
+def _scaled_expm1_scalar(coefficient, exponent):
+    """Plain-float counterpart of _scaled_expm1 for scalar Brent residuals."""
+    if coefficient == 0.0:
+        return 0.0
+    try:
+        direct = coefficient * math.expm1(exponent)
+    except OverflowError:
+        direct = math.copysign(math.inf, coefficient)
+    if math.isfinite(direct) or exponent <= 0.0:
+        return direct
+    log_magnitude = math.log(abs(coefficient)) + exponent
+    if log_magnitude <= math.log(np.finfo(np.float64).max):
+        return math.copysign(math.exp(log_magnitude), coefficient)
+    return direct
+
+
+# ----------------------------------------------------------------------
+# Vectorized solver core
+# ----------------------------------------------------------------------
+
+
+def _recomb_current(V, st):
+    """[A/cm^2] vectorized total recombination + shunt + RBB current density.
+
+    Equivalent to Junction.Jmultidiodes(V) + Junction.JshuntRBB(V), evaluated
+    from the parameter snapshot ``st`` (see Junction._solver_state). ``V`` is
+    the junction-frame diode voltage; scalar or ndarray.
+    """
+    V = np.asarray(V, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        if st["J0"].size:
+            exponent = V[..., None] / (st["n"] * st["Vth"])
+            Jled = np.sum(_scaled_expm1(st["J0"], exponent), axis=-1)
+        else:
+            Jled = np.zeros_like(V)
+        out = Jled + V * st["Gsh"]
+
+        method = st["rbb"].get("method")
+        if method == "JFG":
+            Vrb = st["rbb"]["Vrb"]
+            mrb = st["rbb"]["mrb"]
+            if mrb != 0.0:
+                K = st["rbb"]["J0rb_effective"]
+                out = out + np.where(V <= Vrb, _scaled_expm1(-K, -V / (st["Vth"] * mrb)), 0.0)
+        elif method == "bishop":
+            Vrb = st["rbb"]["Vrb"]
+            av = st["rbb"]["avalanche"]
+            mrb = st["rbb"]["mrb"]
+            if Vrb != 0.0:
+                mask = V <= 0.0
+                base = np.where(mask, 1.0 + V / Vrb, 1.0)  # keep base positive off-branch
+                out = out + np.where(mask, V * st["Gsh"] * av * base ** (-mrb), 0.0)
+        elif method == "pvmismatch":
+            raise NotImplementedError("RBB method 'pvmismatch' is documented but not implemented. Use RBB='JFG', RBB='bishop', or RBB=None.")
+    return out
+
+
+def _recomb_current_deriv(V, st):
+    """[A/cm^2/V] analytic derivative of _recomb_current w.r.t. V.
+
+    Used as the Jacobian of the Newton solvers; smooth everywhere except the
+    RBB branch boundaries (handled by damping in the callers).
+    """
+    V = np.asarray(V, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        if st["J0"].size:
+            denominator = st["n"] * st["Vth"]
+            g = np.sum(_scaled_exp(st["J0"] / denominator, V[..., None] / denominator), axis=-1)
+        else:
+            g = np.zeros_like(V)
+        g = g + st["Gsh"]
+
+        method = st["rbb"].get("method")
+        if method == "JFG":
+            Vrb = st["rbb"]["Vrb"]
+            mrb = st["rbb"]["mrb"]
+            if mrb != 0.0:
+                K = st["rbb"]["J0rb_effective"]
+                denominator = st["Vth"] * mrb
+                g = g + np.where(V <= Vrb, _scaled_exp(K / denominator, -V / denominator), 0.0)
+        elif method == "bishop":
+            Vrb = st["rbb"]["Vrb"]
+            av = st["rbb"]["avalanche"]
+            mrb = st["rbb"]["mrb"]
+            if Vrb != 0.0:
+                mask = V <= 0.0
+                base = np.where(mask, 1.0 + V / Vrb, 1.0)
+                g = g + np.where(mask, st["Gsh"] * av * base ** (-mrb) - V * st["Gsh"] * av * mrb * base ** (-mrb - 1.0) / Vrb, 0.0)
+    return g
+
+
+def _recomb_current_scalar(V, st):
+    """Scalar twin of _recomb_current using plain-python math.
+
+    brentq evaluates the residual ~15 times per solve; numpy scalar-op
+    overhead dominates there, so this pure-float version (~10x faster per
+    call) is used by the small-N loops in _vdiode_arr/_vmid_arr. Uses the
+    same expm1 formulation as the vectorized version so both paths converge
+    to identical roots.
+    """
+    out = 0.0
+    for J0f, binv in zip(st["J0f"], st["ninv"]):
+        x = V * binv
+        out += _scaled_expm1_scalar(J0f, x)
+    out += V * st["Gsh"]
+
+    method = st["rbb"].get("method")
+    if method == "JFG":
+        Vrb = st["rbb"]["Vrb"]
+        mrb = st["rbb"]["mrb"]
+        if V <= Vrb and mrb != 0.0:
+            K = st["rbb"]["J0rb_effective"]
+            x = -V / (st["Vth"] * mrb)
+            out += _scaled_expm1_scalar(-K, x)
+    elif method == "bishop":
+        Vrb = st["rbb"]["Vrb"]
+        if V <= 0.0 and Vrb != 0.0:
+            out += V * st["Gsh"] * st["rbb"]["avalanche"] * (1.0 + V / Vrb) ** (-st["rbb"]["mrb"])
+    elif method == "pvmismatch":
+        raise NotImplementedError("RBB method 'pvmismatch' is documented but not implemented. Use RBB='JFG', RBB='bishop', or RBB=None.")
+    return out
+
+
+def _jem_arr(Vmid, Jphoto, st):
+    """[A/cm^2] vectorized Junction.Jem: PL (gamma*Jphoto) + EL for Vmid > 0."""
+    Vmid = np.asarray(Vmid, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        el = np.where(Vmid > 0.0, _scaled_expm1(st["Jdb"], Vmid / st["Vth"]), 0.0)
+    return st["gamma"] * Jphoto + el
+
+
+def _jem_deriv(Vmid, st):
+    """[A/cm^2/V] derivative of the EL part of _jem_arr w.r.t. Vmid."""
+    Vmid = np.asarray(Vmid, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        return np.where(Vmid > 0.0, _scaled_exp(st["Jdb"] / st["Vth"], Vmid / st["Vth"]), 0.0)
+
+
+class Junction:
     """
     Class for PV junctions.
     """
 
     ATTR = ["Eg", "sigma", "TC", "Gsh", "Rser", "area", "lightarea", "totalarea", "Jext", "JLC", "beta", "gamma", "theta", "pn", "Jphoto", "TK", "Jdb", "RBB"]
     ARY_ATTR = ["n", "J0ratio", "J0"]
-    # Internal numerical-stability factor (mA/cm^2). With ``Jdb ~ 1e-26`` and
-    # ``J0 ~ 1e-21`` the ratio ``J0/Jdb^(1/n)`` would otherwise span ~20 orders
-    # of magnitude. Scaling by 1000 keeps ``J0ratio`` close to O(1) so fits and
-    # serialisation stay numerically well-behaved. Do not change.
-    J0scale = 1000.0
 
     # Diode arrays kept in sync via the custom __setattr__/set() pipeline.
     # Declared here so type checkers can subscript ``self.n[i]`` /
@@ -187,10 +372,10 @@ class Junction(object):
         Gsh: float = 0.0,
         Rser: float = 0.0,
         area: float = AREA_DEFAULT,
-        n: Optional[List[float]] = None,
-        J0ratio: Optional[Union[List[float], np.ndarray]] = None,
-        J0ref: Optional[Union[List[float], np.ndarray]] = None,
-        RBB: Optional[str] = None,
+        n: list[float] | None = None,
+        J0ratio: list[float] | np.ndarray | None = None,
+        J0ref: list[float] | np.ndarray | None = None,
+        RBB: str | None = None,
         Jext: float = 0.04,
         JLC: float = 0.0,
         J0default: float = 10.0,
@@ -264,24 +449,24 @@ class Junction(object):
 
         strout = self.name + ": <pvcircuit.junction.Junction class>"
 
-        strout += "\nEg = {0:.2f} eV, TC = {1:.1f} C".format(self.Eg, self.TC)
+        strout += f"\nEg = {self.Eg:.2f} eV, TC = {self.TC:.1f} C"
 
-        strout += "\nJext = {0:.1f} mA/cm^2, JLC = {1:.1f} mA/cm^2".format(self.Jext * 1000.0, self.JLC * 1000.0)
+        strout += f"\nJext = {self.Jext * 1000.0:.1f} mA/cm^2, JLC = {self.JLC * 1000.0:.1f} mA/cm^2"
 
-        strout += "\nGsh = {0:g} S/cm^2, Rser = {1:g} Ohm*cm^2".format(self.Gsh, self.Rser)
+        strout += f"\nGsh = {self.Gsh:g} S/cm^2, Rser = {self.Rser:g} Ohm*cm^2"
 
-        strout += "\nlightA = {0:g} cm^2, totalA = {1:g} cm^2".format(self.lightarea, self.totalarea)
+        strout += f"\nlightA = {self.lightarea:g} cm^2, totalA = {self.totalarea:g} cm^2"
 
-        strout += "\npn = {0:d}, beta = {1:g}, gamma = {2:g}".format(self.pn, self.beta, self.gamma)
+        strout += f"\npn = {self.pn:d}, beta = {self.beta:g}, gamma = {self.gamma:g}"
         # theta only shown when non-default so existing __str__ baselines stay byte-identical.
         if self.theta != 2.0:
-            strout += ", theta = {0:g}".format(self.theta)
+            strout += f", theta = {self.theta:g}"
 
         strout += "\n {0:^5s} {1:^10s} {2:^10s}".format("n", "J0ratio", "J0(A/cm^2)")
         strout += "\n {0:^5s} {1:^10.0f} {2:^10.3e}".format("db", 1.0, self.Jdb)
 
         for i, _ in enumerate(self.n):
-            strout += "\n {0:^5.2f} {1:^10.2f} {2:^10.3e}".format(self.n[i], self.J0ratio[i], self.J0[i])
+            strout += f"\n {self.n[i]:^5.2f} {self.J0ratio[i]:^10.2f} {self.J0[i]:^10.3e}"
 
         if self.RBB_dict["method"]:
             strout += " \nRBB_dict: " + str(self.RBB_dict)
@@ -397,10 +582,10 @@ class Junction(object):
                             # with self.debugout:
                             #     print("scalar", key, ind, localarray)
                         else:
-                            raise IndexError(f"invalid junction index. Set index is {ind+1} but junction size is {localarray.size}")
+                            raise IndexError(f"invalid junction index. Set index is {ind + 1} but junction size is {localarray.size}")
                 else:
                     # check if both, n and J0ratio, are set if they have the same size
-                    if "n" in kwargs.keys() and "J0ratio" in kwargs.keys():
+                    if "n" in kwargs and "J0ratio" in kwargs:
                         if not len(kwargs["n"]) == len(kwargs["J0ratio"]):
                             raise ValueError("n and J0ratio must be same size")
 
@@ -480,31 +665,133 @@ class Junction(object):
         Recomputed on every access from Jdb, n, and
         J0ratio using the formula
 
-            J0[i] = (Jdb * J0scale)^(1/n[i]) * J0ratio[i] / J0scale
+            J0[i] = J0_REFERENCE * J0ratio[i]
+                    * (Jdb / J0_REFERENCE)^(1/n[i])
 
-        where J0scale = 1000 is an internal numerical-stability factor
-        (see the class-level comment on J0scale). Because
-        Jdb depends on temperature, J0 automatically tracks
-        changes in TC.
+        where J0_REFERENCE = 1e-3 A/cm^2 makes the power-law argument and
+        J0ratio dimensionless. All currents remain in A/cm^2, with a log-domain
+        fallback for numerical stability. Because Jdb depends on temperature,
+        J0 automatically tracks changes in TC.
         """
 
         if (isinstance(self.n, np.ndarray)) and (isinstance(self.J0ratio, np.ndarray)):
             if self.n.size == self.J0ratio.size:
-                return (self.Jdb * self.J0scale) ** (1.0 / self.n) * self.J0ratio / self.J0scale
+                return _saturation_current_from_ratio(self.Jdb, self.n, self.J0ratio)
             else:
                 return np.array(np.nan, dtype=np.float64)  # different sizes
         else:
             return np.array(np.nan, dtype=np.float64)  # not numpy.ndarray
 
-    def _J0init(self, J0ref: Union[List[float], np.ndarray]):
+    def _J0init(self, J0ref: list[float] | np.ndarray):
         """
         initialize self.J0ratio from J0ref
         """
         J0ref = np.array(J0ref)
         if self.n.size == J0ref.size:
-            self.J0ratio = self.J0scale * J0ref / (self.Jdb * self.J0scale) ** (1.0 / self.n)
+            self.J0ratio = _ratio_from_saturation_current(self.Jdb, self.n, J0ref)
         else:
             raise ValueError("J0ref and n must be same size")
+
+    def _solver_state(self) -> dict:
+        """Snapshot of all junction parameters the solvers need, as plain floats/arrays.
+
+        The J0/Vth/Jdb properties are recomputed on every access; hoisting them
+        into this snapshot once per solve (instead of once per residual
+        evaluation) removes the dominant cost from the root-finding loops.
+        The diode filter matches Jmultidiodes: entries with n <= 0
+        or non-finite J0 are dropped.
+        """
+        n = np.atleast_1d(np.asarray(self.n, dtype=np.float64))
+        J0 = np.atleast_1d(np.asarray(self.J0, dtype=np.float64))
+        good = (n > 0.0) & np.isfinite(J0)
+        Vthf = float(self.Vth)
+        Jdbf = float(self.Jdb)
+        rbb = self.RBB_dict.copy()
+        if rbb.get("method") == "JFG" and rbb["mrb"] != 0.0:
+            rbb["J0rb_effective"] = float(_saturation_current_from_ratio(Jdbf, rbb["mrb"], rbb["J0rb"]))
+        return {
+            "n": n[good],
+            "J0": J0[good],
+            "Vth": Vthf,
+            "Gsh": float(self.Gsh),
+            "Rser": float(self.Rser),
+            "Jdb": Jdbf,
+            "gamma": float(self.gamma),
+            "notdiode": bool(self.notdiode()),
+            "rbb": rbb,
+            # plain-python twins for the fast scalar residual
+            "J0f": [float(x) for x in J0[good]],
+            "ninv": [1.0 / (float(ni) * Vthf) for ni in n[good]],
+        }
+
+    def _vdiode_arr(self, Jtot: np.ndarray, state: dict | None = None) -> np.ndarray:
+        """Solve Jtot - _recomb_current(V) = 0 for each element of ``Jtot`` [A/cm^2].
+
+        Vectorized core of Vdiode (no Rser, no Jphoto added here).
+        Returns the junction-frame voltages; np.nan where no root is bracketed
+        in [-VLIM_REVERSE, VLIM_FORWARD] (matching the historical brentq
+        ValueError -> nan behaviour).
+        """
+        st = self._solver_state() if state is None else state
+        Jtot = np.asarray(Jtot, dtype=np.float64)
+        if st["notdiode"]:
+            return np.zeros_like(Jtot)
+
+        if Jtot.size < SCALAR_SOLVE_CUTOFF:
+            out = np.empty_like(Jtot)
+            for k in range(Jtot.size):
+                Jt = Jtot.flat[k]
+                if not np.isfinite(Jt):
+                    out.flat[k] = np.nan
+                    continue
+                try:
+                    out.flat[k] = brentq(lambda V: Jt - _recomb_current_scalar(V, st), -VLIM_REVERSE, VLIM_FORWARD, xtol=XTOL_SOLVE, rtol=EPSREL, maxiter=MAXITER)
+                except ValueError:
+                    out.flat[k] = np.nan
+            return out
+
+        res = elementwise.find_root(
+            lambda V, Jt: Jt - _recomb_current(V, st),
+            (np.full_like(Jtot, -VLIM_REVERSE), np.full_like(Jtot, VLIM_FORWARD)),
+            args=(Jtot,),
+        )
+        return np.where(res.success, res.x, np.nan)
+
+    def _vmid_arr(self, Vtot: np.ndarray, Jphoto: float | np.ndarray, state: dict | None = None, Rser: float | None = None) -> np.ndarray:
+        """Solve Vtot - V + (Jphoto - _recomb_current(V)) * Rser = 0 elementwise.
+
+        Vectorized core of Vmid. ``Jphoto`` may be an array (e.g.
+        per-point luminescent coupling). ``Rser`` overrides the junction's own
+        series resistance (used by Tandem3T to fold Rz in).
+        Returns np.nan where no root is bracketed.
+        """
+        st = self._solver_state() if state is None else state
+        Vtot = np.asarray(Vtot, dtype=np.float64)
+        if st["notdiode"]:
+            return np.zeros_like(Vtot)
+        Rs = st["Rser"] if Rser is None else float(Rser)
+        Jph = np.broadcast_to(np.asarray(Jphoto, dtype=np.float64), Vtot.shape)
+
+        if Vtot.size < SCALAR_SOLVE_CUTOFF:
+            out = np.empty_like(Vtot)
+            for k in range(Vtot.size):
+                Vt = Vtot.flat[k]
+                Jp = Jph.flat[k]
+                if not (np.isfinite(Vt) and np.isfinite(Jp)):
+                    out.flat[k] = np.nan
+                    continue
+                try:
+                    out.flat[k] = brentq(lambda V: Vt - V + (Jp - _recomb_current_scalar(V, st)) * Rs, -VLIM_REVERSE, VLIM_FORWARD, xtol=XTOL_SOLVE, rtol=EPSREL, maxiter=MAXITER)
+                except ValueError:
+                    out.flat[k] = np.nan
+            return out
+
+        res = elementwise.find_root(
+            lambda V, Vt, Jp: Vt - V + (Jp - _recomb_current(V, st)) * Rs,
+            (np.full_like(Vtot, -VLIM_REVERSE), np.full_like(Vtot, VLIM_FORWARD)),
+            args=(Vtot, Jph),
+        )
+        return np.where(res.success, res.x, np.nan)
 
     def Jem(self, Vmid: float) -> float:
         r"""[A/cm^2] light emitted from the junction (current density).
@@ -598,8 +885,8 @@ class Junction(object):
             J0rb = RBB_dict["J0rb"]
             mrb = RBB_dict["mrb"]
             if Vdiode <= Vrb and mrb != 0.0:
-                # JRBB = -J0rb * (self.Jdb)**(1./mrb) * (np.exp(-Vdiode / self.Vth / mrb) - 1.0)
-                JRBB = -J0rb * (self.Jdb * 1000) ** (1.0 / mrb) / 1000.0 * (np.exp(-Vdiode / self.Vth / mrb) - 1.0)
+                J0rb_effective = _saturation_current_from_ratio(self.Jdb, mrb, J0rb)
+                JRBB = -J0rb_effective * (np.exp(-Vdiode / self.Vth / mrb) - 1.0)
 
         elif method == "bishop":
             Vrb = RBB_dict["Vrb"]
@@ -609,10 +896,7 @@ class Junction(object):
                 JRBB = Vdiode * self.Gsh * a * (1.0 + Vdiode / Vrb) ** (-mrb)
 
         elif method == "pvmismatch":
-            raise NotImplementedError(
-                "RBB method 'pvmismatch' is documented but not implemented. "
-                "Use RBB='JFG', RBB='bishop', or RBB=None."
-            )
+            raise NotImplementedError("RBB method 'pvmismatch' is documented but not implemented. Use RBB='JFG', RBB='bishop', or RBB=None.")
 
         # else:
         #     JRBB = self.J0.sum()
@@ -633,39 +917,27 @@ class Junction(object):
         # JRBB = JshuntRBB(Vdiode, self.Vth, self.Gsh, self.RBB_dict)
         return Jtot - JLED - JRBB
 
-    def Vdiode(self, Jdiode: float) -> float:
+    def Vdiode(self, Jdiode: float | np.ndarray) -> float | np.ndarray:
         """
         Jtot = Jphoto + J
         for junction self of class Junction
         return Vdiode(Jtot)
         no Rseries here
+
+        ``Jdiode`` may be a scalar (returns float, historical behaviour) or an
+        ndarray (returns an ndarray of the same shape, solved in one
+        vectorized call).
         """
+        st = self._solver_state()
+        scalar = np.ndim(Jdiode) == 0
+        if st["notdiode"]:  # sum(J0)=0 -> no diode
+            return 0.0 if scalar else np.zeros(np.shape(Jdiode))
 
-        if self.notdiode():  # sum(J0)=0 -> no diode
-            return 0.0
-
-        # Jtot = max(self.Jphoto + Jdiode, 0)
-        Jtot = self.Jphoto + Jdiode
-        # if self.RBB_dict["method"] is None:
-        #     Jtot = max(Jtot, -1 * self.J0.sum())
-
-        try:
-            Vdiode = brentq(
-                self.Jparallel,
-                -VLIM_REVERSE,
-                VLIM_FORWARD,
-                args=(Jtot),
-                xtol=VTOL,
-                rtol=EPSREL,
-                maxiter=MAXITER,
-                full_output=False,
-                disp=True,
-            )
-        except ValueError:
-            return np.nan
-            # print("Exception:",err)
-
-        return Vdiode
+        Jtot = self.Jphoto + np.asarray(Jdiode, dtype=np.float64)
+        out = self._vdiode_arr(np.atleast_1d(Jtot).ravel(), state=st)
+        if scalar:
+            return float(out[0])
+        return out.reshape(np.shape(Jdiode))
 
     def _dV(self, Vmid: float, Vtot: float) -> float:
         """
@@ -678,34 +950,25 @@ class Junction(object):
         dV = Vtot - Vmid + J * self.Rser
         return dV
 
-    def Vmid(self, Vtot: float) -> float:
+    def Vmid(self, Vtot: float | np.ndarray) -> float | np.ndarray:
         """
         see Vparallel
         find intermediate voltage in a single junction diode with series resistance
         Given Vtot=Vparallel + Rser * Jparallel
+
+        ``Vtot`` may be a scalar (returns float, historical behaviour) or an
+        ndarray (returns an ndarray of the same shape, solved in one
+        vectorized call).
         """
+        st = self._solver_state()
+        scalar = np.ndim(Vtot) == 0
+        if st["notdiode"]:  # sum(J0)=0 -> no diode
+            return 0.0 if scalar else np.zeros(np.shape(Vtot))
 
-        if self.notdiode():  # sum(J0)=0 -> no diode
-            return 0.0
-
-        try:
-            Vmid = brentq(
-                self._dV,
-                -VLIM_REVERSE,
-                VLIM_FORWARD,
-                args=(Vtot),
-                xtol=VTOL,
-                rtol=EPSREL,
-                maxiter=MAXITER,
-                full_output=False,
-                disp=True,
-            )
-
-        except ValueError:
-            return np.nan
-            # print("Exception:",err)
-
-        return Vmid
+        out = self._vmid_arr(np.atleast_1d(np.asarray(Vtot, dtype=np.float64)).ravel(), self.Jphoto, state=st)
+        if scalar:
+            return float(out[0])
+        return out.reshape(np.shape(Vtot))
 
     # def controls(self):
     #     """

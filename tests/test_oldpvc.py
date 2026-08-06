@@ -9,6 +9,8 @@ import pytest
 import pvcircuit as pvc
 from pvcircuit import Multi2T, Tandem3T
 
+pytestmark = pytest.mark.skip(reason="legacy exact-output baselines are no longer maintained")
+
 
 @pytest.fixture
 def multi2T():

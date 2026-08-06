@@ -95,9 +95,12 @@ Direction of pn diode
 Ideality factor *numpy.array*
 
 ### Junction.J0ratio[J0ratio0, J0ratio1, etc]
-Ratio of saturation current densities relative to Jdb  *numpy.array*
+Dimensionless saturation-current factors relative to Jdb *numpy.array*.
+PVcircuit uses `J0_REFERENCE = 1e-3 A/cm2` to make the fractional-power
+relation dimensionally consistent while keeping all currents in A/cm2:
 
-    J0ratio = J0 / (Jdb)^(1/n)
+    J0 = J0_REFERENCE * J0ratio * (Jdb / J0_REFERENCE)^(1/n)
+    J0ratio = (J0 / J0_REFERENCE) / (Jdb / J0_REFERENCE)^(1/n)
 
 ### Junction.ui
 User interface created by .controls()
@@ -121,7 +124,8 @@ If J0ratio for n=1 only this is Shockley-Quiesser limit
 Total photocurrent = Jext+JLC
 
 ### Junction.J0[J00, J01, etc]
-Reverse saturation currents (A/cm2) corresponding to each n[] and J0ratio[] *numpy.array*
+Reverse saturation currents (A/cm2) corresponding to each n[] and J0ratio[] *numpy.array*.
+The conversion falls back to log space to avoid intermediate underflow or overflow.
 
 ## Junction.methods()
 

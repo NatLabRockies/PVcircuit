@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# ruff: noqa: N999 renaming the class will be a breaking pain
 """
 This is the PVcircuit Package.
     pvcircuit.Multi2T()    # properties of a 2T multijunction with arbitrary junctions
@@ -9,29 +9,25 @@ from __future__ import annotations
 import copy
 import math  # simple math
 from time import time
-from typing import List, Optional, Union
+from typing import TYPE_CHECKING, ClassVar
 
 import matplotlib.pyplot as plt  # plotting
 import numpy as np  # arrays
-from loguru import logger
-from scipy.optimize import root, root_scalar
+from scipy.optimize import root_scalar
 
 from pvcircuit import junction
 from pvcircuit.junction import Junction
 
-# from pvcircuit.tandem3T import Tandem3T
-
-VTOL = 1e-15
-EPSREL = 1e-15
-MAXITER = 1000
+if TYPE_CHECKING:
+    from pvcircuit.tandem3T import Tandem3T
 
 
-class Multi2T(object):
+class Multi2T:
     """
     Multi2T class for optoelectronic model of two terminal multijunction
     """
 
-    junctioncolors = [
+    junctioncolors: ClassVar[list[list[str]]] = [
         ["black"],  # 0J
         ["red"],  # 1J
         ["blue", "red"],  # 2J
@@ -48,10 +44,10 @@ class Multi2T(object):
         Rs2T: float = 0.0,
         area: float = 1.0,
         Jext: float = 0.014,
-        Eg_list: Optional[List[float]] = None,
-        n: Optional[List[float]] = None,
-        J0ratio: Optional[Union[List[float], np.ndarray]] = None,
-        J0ref: Optional[Union[List[float], np.ndarray]] = None,
+        Eg_list: list[float] | None = None,
+        n: list[float] | None = None,
+        J0ratio: list[float] | np.ndarray | None = None,
+        J0ref: list[float] | np.ndarray | None = None,
     ):
         # user inputs
         # note n and J0ratio much be same size
@@ -73,7 +69,7 @@ class Multi2T(object):
         self.njuncs = len(Eg_list)
         # CM = 0.03 / self.njuncs #TODO remove
         self.Vmid = np.full(self.njuncs, np.nan, dtype=np.float64)  # subcell voltages
-        self.j = list()  # empty list of junctions
+        self.j: list[Junction] = []
         for i, Eg in enumerate(Eg_list):
             jname = "j[" + str(i) + "]"
             self.j.append(Junction(name=jname, Eg=Eg, TC=TC, n=n, J0ratio=J0ratio, J0ref=J0ref, Jext=Jext, area=area))
@@ -96,7 +92,7 @@ class Multi2T(object):
         return tmp
 
     @classmethod
-    def from_3T(cls, dev3T: object, copy_attributes: bool = True) -> Multi2T:
+    def from_3T(cls, dev3T: Tandem3T, copy_attributes: bool = True) -> Multi2T:
         """
         create a Multi2T object that contains the values from a Tandem3T object
         input dev3T is Tandem3T object
@@ -178,7 +174,7 @@ class Multi2T(object):
 
         strout = self.name + ": <pvcircuit.multi2T.Multi2T class>"
 
-        strout += "\nT = {0:.1f} C, Rs2T= {1:g} Ohm*cm^2".format(self.TC, self.Rs2T)
+        strout += f"\nT = {self.TC:.1f} C, Rs2T= {self.Rs2T:g} Ohm*cm^2"
 
         for i in range(self.njuncs):
             strout += "\n\n" + str(self.j[i])
@@ -266,46 +262,64 @@ class Multi2T(object):
             elif key not in list(self.__dict__.keys()):
                 raise ValueError(f"invalid class attribute {key}")
 
-    def V2T(self, I: float) -> float:  # noqa: E741
+    def V2T(self, I: float | np.ndarray) -> float | np.ndarray:
         """
         calcuate V(J) of 2T multijunction
+
         """
+        I_in = np.asarray(I, dtype=np.float64)
+        scalar = I_in.ndim == 0
+        I_flat = np.atleast_1d(I_in).ravel()
+        npts = I_flat.size
 
-        # convert to prevent brent warnings
-        if isinstance(I, np.ndarray) and I.size == 1:
-            I = I.item()  # noqa: E741
-        else:
-            I = np.float64(I)  # noqa: E741
-
-        for i in range(self.njuncs):
+        Vmid = np.empty((self.njuncs, npts), dtype=np.float64)
+        jem_prev: np.ndarray | None = None  # emission of the previous junction, per point
+        JLC_last = np.zeros(self.njuncs, dtype=np.float64)
+        for i, junc in enumerate(self.j):
+            st = junc._solver_state()
             if i > 0:  # previous LC
-                self.j[i].JLC = self.j[i].beta * self.j[i - 1].Jem(self.Vmid[i - 1])
-                if self.j[i - 1].totalarea < self.j[i].totalarea:  # distribute LC over total area
-                    self.j[i].JLC *= self.j[i - 1].totalarea / self.j[i].totalarea
-
+                assert jem_prev is not None
+                prev = self.j[i - 1]
+                JLC = junc.beta * jem_prev
+                if prev.totalarea < junc.totalarea:  # distribute LC over total area
+                    JLC = JLC * prev.totalarea / junc.totalarea
             else:
-                self.j[i].JLC = 0.0  # no LC in top junction
+                JLC = np.zeros(npts)  # no LC in top junction
 
-            self.Vmid[i] = self.j[i].Vdiode(I / self.j[i].totalarea)
+            Jphoto = junc.Jext * junc.lightarea / junc.totalarea + JLC
+            if st["notdiode"]:
+                Vmid[i] = 0.0
+            else:
+                Vmid[i] = junc._vdiode_arr(Jphoto + I_flat / junc.totalarea, state=st)
+            jem_prev = junction._jem_arr(Vmid[i], Jphoto, st)
+            JLC_last[i] = JLC[-1] if npts else 0.0
 
         # Rs2T [\Omega*cm^2] * I [A] / totalarea [cm^2] = V (series-resistance drop).
-        Vtot = np.sum(self.Vmid) + self.Rs2T * I / self.totalarea
+        Vtot = Vmid.sum(axis=0) + self.Rs2T * I_flat / self.totalarea
 
-        # TODO raise error
-        if not math.isfinite(Vtot):  # if one nan all nan
-            # for i in range(self.njuncs): self.Vmid[i]=np.nan
-            pass
+        # historical state side-effects: JLC and Vmid reflect the last point
+        if npts:
+            for i, junc in enumerate(self.j):
+                junc.JLC = np.float64(JLC_last[i])
+                self.Vmid[i] = Vmid[i, -1]
 
-        return Vtot
+        if scalar:
+            return float(Vtot[0])
+        return Vtot.reshape(I_in.shape)
 
     def Imaxrev(self):
-        # find max rev-bias current (w/o Gsh or breakdown)
+        """Maximum series current magnitude before a junction has no root.
+
+        Without shunt or reverse breakdown, each junction is bounded by
+        (Jphoto + sum(J0)) * area. A series stack is limited by the
+        smallest of those absolute currents.
+        """
         # Voc = self.Voc()  # this also calculates JLC at Voc TODO Remove
         J0s = self.proplist("J0")
         Jphotos = self.proplist("Jphoto")
         Jmaxs = Jphotos + np.sum(J0s, axis=1)
         areas = self.proplist("totalarea")
-        Imax = max([j * a for j, a in zip(Jmaxs, areas)])
+        Imax = min([j * a for j, a in zip(Jmaxs, areas)])
         return Imax
 
     def _I2T_root_target(self, current, target_voltage):
@@ -339,11 +353,7 @@ class Multi2T(object):
         while abs(Idelta / Idelta_start) > 1e-7:
             Inew = Iold + Idelta
             Vnew = self.V2T(Inew)
-            if not math.isfinite(Vnew):
-                Idelta /= stepratio
-            elif (Vnew < V) and (V <= Voc):
-                Idelta /= stepratio
-            elif (Vnew > V) and (V > Voc):
+            if not math.isfinite(Vnew) or (Vnew < V <= Voc) or (Vnew > V > Voc):
                 Idelta /= stepratio
             else:
                 Iold = Inew
@@ -363,26 +373,72 @@ class Multi2T(object):
         """
 
         V = np.float64(V)
+        Voc = self.Voc()
 
-        # Assuming the current at open circuit is zero and using Imaxrev for the reverse bias limit
-        I_min = -1 * self.Imaxrev()
-        I_max = 0
+        if V == Voc:
+            return 0.0
 
-        # Use fsolve as an alternative to brentq
-        initial_guess = I_max
+        if V <= Voc:
+            I_max = 0.0
+            f_max = Voc - V
+            photo_boundaries = [-float(junc.Jphoto * junc.totalarea) for junc in self.j]
+            I_invalid = -float(self.Imaxrev())
+            I_min = I_invalid
+            f_min = self._I2T_root_target(I_min, V)
 
-        try:
-            I_solution = root_scalar(self._I2T_root_target, x0=initial_guess, args=(V,), bracket=[I_min, I_max], method="brenth", xtol=1e-15)
-            if not I_solution.converged:
-                raise ValueError
-            return I_solution.root
-        except ValueError as err:
-            logger.warning("root_scalar failed ({}); falling back to root", err)
-            I_solution = root(self._I2T_root_target, x0=initial_guess, args=(V,), method="lm", tol=1e-15, options={"xtol": 1e-15, "ftol": 1e-15, "maxiter": 10000, "factor": 0.1})
-            if np.isfinite(I_solution.x):
-                return I_solution.x[0]
+            # Imaxrev is the largest junction reverse-current limit. With
+            # unequal limits it can put another junction just outside its
+            # voltage bracket. Locate the first finite current by bisection;
+            # the requested root may be exactly at that finite-domain edge.
+            if not np.isfinite(f_min):
+                I_finite = I_max
+                for _ in range(80):
+                    I_mid = (I_invalid + I_finite) / 2.0
+                    if I_mid == I_invalid or I_mid == I_finite:
+                        break
+                    f_mid = self._I2T_root_target(I_mid, V)
+                    if np.isfinite(f_mid):
+                        I_finite = I_mid
+                        f_min = f_mid
+                    else:
+                        I_invalid = I_mid
+                I_min = I_finite
+
+            bracket_candidates = []
+            for candidate in [I_min, *photo_boundaries]:
+                residual = self._I2T_root_target(candidate, V)
+                if np.isfinite(residual) and residual <= 0.0:
+                    bracket_candidates.append((candidate, residual))
+
+            if not bracket_candidates:
+                raise RuntimeError(f"Could not bracket I2T root at V={V:g} V")
+            I_min, f_min = max(bracket_candidates, key=lambda item: item[0])
+            if abs(f_min) <= junction.XTOL_SOLVE:
+                return float(I_min)
+        else:
+            I_min = 0.0
+            f_min = Voc - V
+            I_max = float(self.Imaxrev())
+            f_max = self._I2T_root_target(I_max, V)
+            for _ in range(80):
+                if np.isfinite(f_max) and f_max >= 0.0:
+                    break
+                I_max *= 2.0
+                f_max = self._I2T_root_target(I_max, V)
             else:
-                raise RuntimeError("Both root_scalar and root failed.")
+                raise RuntimeError(f"Could not bracket I2T root at V={V:g} V")
+
+        I_solution = root_scalar(
+            self._I2T_root_target,
+            args=(V,),
+            bracket=(I_min, I_max),
+            method="brenth",
+            xtol=1e-15,
+            rtol=1e-15,
+        )
+        if not I_solution.converged:
+            raise RuntimeError(f"I2T root solve did not converge at V={V:g} V")
+        return I_solution.root
 
     def proplist(self, key):
         # list of junction properties
@@ -413,8 +469,6 @@ class Multi2T(object):
         Isc = self.Isc()
         Ilo = -Isc
         Ihi = 0.0  # 1mA forward
-        # ndarray functions
-        V2Tvect = np.vectorize(self.V2T)
 
         Jext_list = self.proplist("Jext")  # list external photocurrents at Voc
         if math.isclose(max(Jext_list), 0.0, abs_tol=1e-6):
@@ -436,9 +490,8 @@ class Multi2T(object):
 
             for _ in range(5):
                 Itemp = np.linspace(Ilo, Ihi, pnts)
-                # Vtemp = np.array([self.V2T(I) for I in Itemp])
-                Vtemp = V2Tvect(Itemp)
-                Ptemp = np.array([(-v * j) for v, j in zip(Vtemp, Itemp)])
+                Vtemp = np.asarray(self.V2T(Itemp), dtype=np.float64)
+                Ptemp = -Vtemp * Itemp
                 nmax = np.argmax(Ptemp)
                 if bplot:
                     ax.plot(Vtemp, Itemp, marker=".", ls="")

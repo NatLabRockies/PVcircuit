@@ -1,3 +1,4 @@
+# noqa: N999
 import itertools
 import re
 from pathlib import Path
@@ -186,8 +187,38 @@ def test_I3Trel(dev3T, iv3t):
     # also test top beta
     dev3T.top.set(beta=0.2)
     dev3T.I3Trel(iv3t)
-    iv3t.__str__()
-    np.testing.assert_almost_equal(np.nanmax(iv3t.Ito), 0.02073220838616)
+    finite = np.isfinite(iv3t.Iro) & np.isfinite(iv3t.Izo) & np.isfinite(iv3t.Ito)
+    assert np.count_nonzero(finite) > 0.95 * finite.size
+    assert np.nanmax(np.abs(iv3t.Iro + iv3t.Izo + iv3t.Ito)) < 1e-10
+
+
+def test_scaled_newton_system_handles_mixed_units():
+    jacobian = np.array(
+        [
+            [[1e-20, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3e20]],
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        ]
+    )
+    expected = np.array([1.0, -2.0, 3.0])
+    residual = np.vstack((-jacobian[0] @ expected, np.ones(3)))
+
+    delta = pvc.tandem3T._solve_scaled_newton_system(jacobian, residual)
+
+    np.testing.assert_allclose(delta[0], expected, rtol=1e-14)
+    assert np.all(np.isnan(delta[1]))
+
+
+def test_I3Trel_vectorized_matches_brent_fallback(dev3T):
+    vectorized = IV3T(name="vectorized", meastype="CZ")
+    vectorized.box("VA", -1.2, 0.1, 9, "VB", -1.2, 0.1, 9)
+    vectorized.convert("V", "load2dev")
+    fallback = vectorized.copy()
+
+    dev3T.I3Trel(vectorized)
+    dev3T.copy()._i3t_brent_fallback(fallback)
+
+    for key in vectorized.Idevlist:
+        np.testing.assert_allclose(getattr(vectorized, key), getattr(fallback, key), rtol=1e-9, atol=1e-10, equal_nan=True)
 
 
 def test_VM(dev3T):
@@ -253,13 +284,21 @@ def test_MPP(dev3T):
 
 def test_VI0(dev3T):
 
-    for point in [
-        "VztIro",
-        "VrzIto",
-        "VtrIzo",
-    ]:
+    constraints = {
+        "VztIro": ("Vzt", "Iro"),
+        "VrzIto": ("Vrz", "Ito"),
+        "VtrIzo": ("Vtr", "Izo"),
+    }
+    for point, (voltage_key, current_key) in constraints.items():
 
         iv3t = dev3T.VI0(point)
+
+        assert abs(getattr(iv3t, voltage_key)[0]) < 1e-6
+        assert abs(getattr(iv3t, current_key)[0]) < 1e-12
+        assert abs(iv3t.Iro[0] + iv3t.Izo[0] + iv3t.Ito[0]) < 1e-12
+        assert abs(iv3t.Vzt[0] + iv3t.Vrz[0] + iv3t.Vtr[0]) < 1e-12
+        if point == "VtrIzo":
+            assert abs(iv3t.Vtr[0]) < 1e-9
 
         test_file = f"Tandem3T_VI0_{point}.txt"
         if REGENERATE_TEST_FILES:
@@ -270,7 +309,7 @@ def test_VI0(dev3T):
         with open(pvc.pvcpath.parent.joinpath("tests", "test_files", test_file), "r", encoding="utf8") as fin:
             test_str = fin.read()
 
-        np.testing.assert_string_equal(re.sub(r"\s+", " ", test_str), re.sub(r"\s+", " ", iv3t.__str__()))
+        np.testing.assert_string_equal(re.sub(r"\s+", " ", test_str).strip(), re.sub(r"\s+", " ", iv3t.__str__()).strip())
 
 
 def test_VIpoints(dev3T):

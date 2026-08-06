@@ -3,4 +3,4 @@ IroVyhex: <pvcircuit.iv3T.IV3T class>
 sizes(1, 1)
 
  #     mIro     mIzo     mIto     Vzt      Vrz      Vtr      mIA      mIB       VA       VB     mPtot    mIxhex   mIyhex   Vxhex    Vyhex  
-(0,)  0.00    -11.05    11.05    1.352    1.051   -2.403    0.00     11.05    1.051   -1.352    14.94    -7.81   -12.76    2.656    1.213  
+(0,)  0.00    -11.10    11.10    1.352    1.051   -2.402    0.00     11.10    1.051   -1.352    15.00    -7.85   -12.82    2.654    1.213  

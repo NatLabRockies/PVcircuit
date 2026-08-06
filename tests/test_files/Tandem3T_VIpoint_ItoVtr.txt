@@ -3,4 +3,4 @@ ItoVtr: <pvcircuit.iv3T.IV3T class>
 sizes(1, 1)
 
  #     mIro     mIzo     mIto     Vzt      Vrz      Vtr      mIA      mIB       VA       VB     mPtot    mIxhex   mIyhex   Vxhex    Vyhex  
-(0,) -12.90    12.90    0.00     1.438    1.013   -2.451   -12.90    0.00     1.013   -1.438    13.07    -9.12    14.90    2.750    1.170  
+(0,) -12.90    12.90    0.00     1.438    1.014   -2.451   -12.90    0.00     1.014   -1.438    13.07    -9.12    14.90    2.750    1.170  

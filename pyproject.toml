@@ -33,7 +33,7 @@ name = "pvcircuit"  # REQUIRED, is the only field that cannot be marked as dynam
 #
 # For a discussion on single-sourcing the version, see
 # https://packaging.python.org/guides/single-sourcing-package-version/
-version = "0.0.5"  # REQUIRED, although can be dynamic
+version = "0.0.6"  # REQUIRED, although can be dynamic
 
 # This is a one-line description or tagline of what your project does. This
 # corresponds to the "Summary" metadata field:
@@ -224,11 +224,9 @@ show_missing = true # shows lines without coverage
 directory = "htmlcov"  # HTML output directory
 title = "PVcircuit coverage report"
 
-[tool.uv.workspace]
-members = ["../NREL_measurement_data_evaluation"]
-
+# NREL internal toolkit
 [tool.uv.sources]
-nrel-measurement-data-evaluation = { workspace = true }
+nrel-measurement-data-evaluation = { path = "../NREL_measurement_data_evaluation", editable = true }
 
 [dependency-groups]
 dev = [

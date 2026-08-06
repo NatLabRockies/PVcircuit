@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 This is the PVcircuit Package.
     pvcircuit.Tandem3T()   # properties of a 3T tandem including 2 junctions
@@ -7,7 +6,6 @@ This is the PVcircuit Package.
 import copy
 import math  # simple math
 from time import time
-from typing import List, Optional
 
 import matplotlib.pyplot as plt  # plotting
 import numpy as np  # arrays
@@ -21,14 +19,49 @@ from pvcircuit.junction import Junction
 from pvcircuit.multi2T import Multi2T
 
 
-class Tandem3T(object):
+def _solve_scaled_newton_system(jacobian, residual):
+    """Solve batched Newton systems after equilibrating residual rows.
+
+    The first two Tandem3T equations are voltages while the third is current.
+    Row scaling removes that unit-dependent magnitude imbalance without
+    changing the Newton step. Singular or non-finite systems return NaN so the
+    caller can route those points through the bracketed fallback.
+    """
+    jacobian = np.asarray(jacobian, dtype=np.float64)
+    residual = np.asarray(residual, dtype=np.float64)
+    delta = np.full_like(residual, np.nan)
+
+    row_scale = np.max(np.abs(jacobian), axis=-1)
+    valid = (
+        np.all(np.isfinite(jacobian), axis=(-2, -1))
+        & np.all(np.isfinite(residual), axis=-1)
+        & np.all(row_scale > 0.0, axis=-1)
+    )
+    if not np.any(valid):
+        return delta
+
+    scaled_jacobian = jacobian[valid] / row_scale[valid, :, None]
+    scaled_rhs = -residual[valid] / row_scale[valid]
+    valid_indices = np.flatnonzero(valid)
+    try:
+        delta[valid] = np.linalg.solve(scaled_jacobian, scaled_rhs[..., None])[..., 0]
+    except np.linalg.LinAlgError:
+        for output_index, matrix, rhs in zip(valid_indices, scaled_jacobian, scaled_rhs):
+            try:
+                delta[output_index] = np.linalg.solve(matrix, rhs)
+            except np.linalg.LinAlgError:
+                continue
+    return delta
+
+
+class Tandem3T:
     """
     Tandem3T class for optoelectronic model
     """
 
     update_now = True
 
-    def __init__(self, name="Tandem3T", TC: float = junction.TC_REF, Rz: float = 1, Eg_list: Optional[List[float]] = None, pn: Optional[List[int]] = None, Jext: float = 0.014):
+    def __init__(self, name="Tandem3T", TC: float = junction.TC_REF, Rz: float = 1, Eg_list: list[float] | None = None, pn: list[int] | None = None, Jext: float = 0.014):
         # user inputs
         # default s-type n-on-p
 
@@ -78,7 +111,7 @@ class Tandem3T(object):
         # print(attr_list)
 
         strout = self.name + ": <pvcircuit.tandem3T.Tandem3T class>"
-        strout += "\nT = {0:.1f} C, Rz= {1:g} Ohm*cm^2, Rt= {2:g} Ohm*cm^2, Rr = {3:g} Ohm*cm^2".format(self.TC, self.Rz, self.top.Rser, self.bot.Rser)
+        strout += f"\nT = {self.TC:.1f} C, Rz= {self.Rz:g} Ohm*cm^2, Rt= {self.top.Rser:g} Ohm*cm^2, Rr = {self.bot.Rser:g} Ohm*cm^2"
         strout += "\n\n" + str(self.top)
         strout += "\n\n" + str(self.bot)
         return strout
@@ -165,6 +198,9 @@ class Tandem3T(object):
         """
         calcuate iv3T.(Vzt,Vrz,Vtr) from iv3T.(Iro,Izo,Ito)
         input class tandem.IV3T object iv3T
+
+        Vectorized: all points are solved simultaneously (one elementwise
+        root solve per junction per LC pass) instead of per-point brentq.
         """
 
         top = self.top  # top Junction
@@ -176,71 +212,66 @@ class Tandem3T(object):
         if err:
             return err
 
-        # i = 0
-        # for index in np.ndindex(iv3T.shape):
-        for i, _ in enumerate(np.ndindex(iv3T.shape)):
-            # for Ito, Iro, Izo in zip(iv3T.Ito.flat, iv3T.Iro.flat, iv3T.Izo.flat):
-            # loop through points
+        st_t = top._solver_state()
+        st_b = bot._solver_state()
 
-            Ito = iv3T.Ito.flat[i]
-            Iro = iv3T.Iro.flat[i]
-            Izo = iv3T.Izo.flat[i]
-            # loop through points
-            kzero = Ito + Iro + Izo
-            if not math.isclose(kzero, 0.0, abs_tol=1e-5):
-                # print(i, 'Kirchhoff violation', kzero)
-                iv3T.Vzt[i] = np.nan
-                iv3T.Vrz[i] = np.nan
-                iv3T.Vtr[i] = np.nan
-                # i += 1
-                continue
+        Ito = np.asarray(iv3T.Ito, dtype=np.float64).ravel()
+        Iro = np.asarray(iv3T.Iro, dtype=np.float64).ravel()
+        Izo = np.asarray(iv3T.Izo, dtype=np.float64).ravel()
+        npts = Ito.size
 
-            # input current densities
-            # Jt, Jr, Jz are current densities [A/cm^2] obtained from the
-            # absolute device currents Iro, Izo, Ito [A] divided by the
-            # corresponding junction or device totalarea [cm^2].
-            Jt = Ito / top.totalarea
-            Jr = Iro / bot.totalarea
-            Jz = Izo / self.totalarea
+        # Kirchhoff filter (nan inputs also fail this test -> nan outputs)
+        with np.errstate(invalid="ignore"):
+            valid = np.abs(Ito + Iro + Izo) <= 1e-5
 
-            # top Junction
-            top.JLC = 0.0
-            Vtmid = top.Vdiode(Jt * top.pn) * top.pn
-            Vt = Vtmid + Jt * top.Rser
+        # input current densities
+        # Jt, Jr, Jz are current densities [A/cm^2] obtained from the
+        # absolute device currents Iro, Izo, Ito [A] divided by the
+        # corresponding junction or device totalarea [cm^2].
+        Jt = Ito / top.totalarea
+        Jr = Iro / bot.totalarea
+        Jz = Izo / self.totalarea
 
-            # bot Junction
-            bot.JLC = bot.beta * top.Jem(Vtmid * top.pn)  # top to bot LC
-            if top.totalarea < bot.totalarea:  # distribute LC over total area
-                bot.JLC *= top.totalarea / bot.totalarea
+        scale_tb = top.totalarea / bot.totalarea if top.totalarea < bot.totalarea else 1.0
+        scale_bt = bot.totalarea / top.totalarea if bot.totalarea < top.totalarea else 1.0
 
-            Vrmid = bot.Vdiode(Jr * bot.pn) * bot.pn
-            Vr = Vrmid + Jr * bot.Rser
+        # top Junction (no LC into the top on the first pass)
+        Jphoto_t = top.Jext * top.lightarea / top.totalarea + np.zeros(npts)
+        ut = top._vdiode_arr(Jphoto_t + Jt * top.pn, state=st_t)  # junction-frame Vtmid
+        Vt = ut * top.pn + Jt * top.Rser
 
-            if top.beta > 0.0:  # repeat if backwards LC
-                # top Junction
-                top.JLC = top.beta * bot.Jem(Vrmid * bot.pn)  # bot to top LC
-                if bot.totalarea < top.totalarea:  # distribute LC over total area
-                    top.JLC *= bot.totalarea / top.totalarea
-                Vtmid = top.Vdiode(Jt * top.pn) * top.pn
-                Vt = Vtmid + Jt * top.Rser
+        # bot Junction with top -> bot LC
+        JLC_b = bot.beta * junction._jem_arr(ut, Jphoto_t, st_t) * scale_tb
+        Jphoto_b = bot.Jext * bot.lightarea / bot.totalarea + JLC_b
+        ur = bot._vdiode_arr(Jphoto_b + Jr * bot.pn, state=st_b)
+        Vr = ur * bot.pn + Jr * bot.Rser
 
-                # bot Junction
-                bot.JLC = bot.beta * top.Jem(Vtmid * top.pn)  # top to bot LC
-                if top.totalarea < bot.totalarea:  # distribute LC over total area
-                    bot.JLC *= top.totalarea / bot.totalarea
-                Vrmid = bot.Vdiode(Jr * bot.pn) * bot.pn
-                Vr = Vrmid + Jr * bot.Rser
+        JLC_t = np.zeros(npts)
+        if top.beta > 0.0:  # repeat if backwards LC
+            JLC_t = top.beta * junction._jem_arr(ur, Jphoto_b, st_b) * scale_bt
+            Jphoto_t = top.Jext * top.lightarea / top.totalarea + JLC_t
+            ut = top._vdiode_arr(Jphoto_t + Jt * top.pn, state=st_t)
+            Vt = ut * top.pn + Jt * top.Rser
 
-            # extra Z contact
-            # Vz [V] = Jz [A/cm^2] * Rz [\Omega*cm^2]. The matching units make Rz an
-            # area-normalised resistance, mirroring Junction.Rser.
-            Vz = Jz * self.Rz
+            JLC_b = bot.beta * junction._jem_arr(ut, Jphoto_t, st_t) * scale_tb
+            Jphoto_b = bot.Jext * bot.lightarea / bot.totalarea + JLC_b
+            ur = bot._vdiode_arr(Jphoto_b + Jr * bot.pn, state=st_b)
+            Vr = ur * bot.pn + Jr * bot.Rser
 
-            # items in array = difference of local variable
-            iv3T.Vzt.flat[i] = Vz - Vt
-            iv3T.Vrz.flat[i] = Vr - Vz
-            iv3T.Vtr.flat[i] = Vt - Vr
-            # i += 1
+        # extra Z contact
+        # Vz [V] = Jz [A/cm^2] * Rz [\Omega*cm^2]. The matching units make Rz an
+        # area-normalised resistance, mirroring Junction.Rser.
+        Vz = Jz * self.Rz
+
+        nan = np.nan
+        iv3T.Vzt = np.where(valid, Vz - Vt, nan).reshape(iv3T.shape)
+        iv3T.Vrz = np.where(valid, Vr - Vz, nan).reshape(iv3T.shape)
+        iv3T.Vtr = np.where(valid, Vt - Vr, nan).reshape(iv3T.shape)
+
+        # historical state side-effects: junction JLC left at last point's value
+        if npts:
+            top.JLC = np.float64(JLC_t[-1])
+            bot.JLC = np.float64(JLC_b[-1])
 
         iv3T.Pcalc()  # dev2load defaults
 
@@ -270,78 +301,69 @@ class Tandem3T(object):
         if bot.notdiode() and bot.Rser == 0:
             return 1
 
-        # i = 0
-        # for index in np.ndindex(iv3T.shape):
-        for i, _ in enumerate(np.ndindex(iv3T.shape)):
-            # for Vz, Vr, Vt in zip(iv3T.Vzt.flat, iv3T.Vrz.flat, iv3T.Vtr.flat):
-            # loop through points
-            # ABSOLUTE (Vz,Vr,Vt) mapped <- iv3T.(Vzt,Vrz,Vtr)
+        st_t = top._solver_state()
+        st_b = bot._solver_state()
 
-            Vz = iv3T.Vzt.flat[i]
-            Vr = iv3T.Vrz.flat[i]
-            Vt = iv3T.Vtr.flat[i]
-            # top Junction
-            top.JLC = 0.0
-            if top.notdiode():  # top resistor only
-                Vtmid = 0.0
-                Jt = Vt / top.Rser
-            else:  # top diode
-                Vtmid = top.Vmid(Vt * top.pn) * top.pn
-                Jt = -top.Jparallel(Vtmid * top.pn, top.Jphoto) * top.pn
+        # ABSOLUTE (Vz,Vr,Vt) mapped <- iv3T.(Vzt,Vrz,Vtr)
+        Vz = np.asarray(iv3T.Vzt, dtype=np.float64).ravel()
+        Vr = np.asarray(iv3T.Vrz, dtype=np.float64).ravel()
+        Vt = np.asarray(iv3T.Vtr, dtype=np.float64).ravel()
+        npts = Vz.size
 
-            # bot Junction
-            bot.JLC = bot.beta * top.Jem(Vtmid * top.pn)  # top to bot LC
-            if top.totalarea < bot.totalarea:  # distribute LC over total area
-                bot.JLC *= top.totalarea / bot.totalarea
+        scale_tb = top.totalarea / bot.totalarea if top.totalarea < bot.totalarea else 1.0
+        scale_bt = bot.totalarea / top.totalarea if bot.totalarea < top.totalarea else 1.0
+        base_t = top.Jext * top.lightarea / top.totalarea
+        base_b = bot.Jext * bot.lightarea / bot.totalarea
 
-            if bot.notdiode():  # bot resistor only
-                Vrmid = 0.0
-                Jr = Vr / bot.Rser
-            else:  # bot diode
-                Vrmid = bot.Vmid(Vr * bot.pn) * bot.pn
-                Jr = -bot.Jparallel(Vrmid * bot.pn, bot.Jphoto) * bot.pn
-
-            if top.beta > 0.0:  # repeat if backwards LC
-                # top Junction
-                top.JLC = top.beta * bot.Jem(Vrmid * bot.pn)  # bot to top LC
-                if bot.totalarea < top.totalarea:  # distribute LC over total area
-                    top.JLC *= bot.totalarea / top.totalarea
-
-                if top.notdiode():  # top resistor only
-                    Vtmid = 0.0
-                    Jt = Vt / top.Rser
-                else:  # top diode
-                    Vtmid = top.Vmid(Vt * top.pn) * top.pn
-                    Jt = -top.Jparallel(Vtmid * top.pn, top.Jphoto) * top.pn
-
-                # bot Junction
-                bot.JLC = bot.beta * top.Jem(Vtmid * top.pn)  # top to bot LC
-                if top.totalarea < bot.totalarea:  # distribute LC over total area
-                    bot.JLC *= top.totalarea / bot.totalarea
-
-                if bot.notdiode():  # bot resistor only
-                    Vrmid = 0.0
-                    Jr = Vr / bot.Rser
-                else:  # bot diode
-                    Vrmid = bot.Vmid(Vr * bot.pn) * bot.pn
-                    Jr = -bot.Jparallel(Vrmid * bot.pn, bot.Jphoto) * bot.pn
-
-            # extra Z contact
-            if self.Rz == 0.0:
-                Jz = (-Jt * top.totalarea - Jr * bot.totalarea) / self.totalarea  # determine from kirchhoff
+        def _solve_junction(junc, st, Vabs, Jphoto):
+            """junction-frame midpoint voltage and terminal current density"""
+            if st["notdiode"]:  # resistor only
+                umid = np.zeros(npts)
+                J = Vabs / junc.Rser
             else:
-                Jz = Vz / self.Rz  # determine from Rz
+                umid = junc._vmid_arr(Vabs * junc.pn, Jphoto, state=st)
+                J = -(Jphoto - junction._recomb_current(umid, st)) * junc.pn
+            return umid, J
 
-            # Store ABSOLUTE currents [A] in iv3T.(Iro, Izo, Ito), honouring
-            # the IV3T contract (Idevlist is in Amps). The bottom-terminal
-            # current is the bottom-junction density times bot.totalarea; the
-            # mid-contact current uses the device totalarea (= max(top, bot));
-            # the top-terminal current uses top.totalarea. Equal-area devices
-            # are unaffected because totalarea collapses to a single value.
-            iv3T.Iro.flat[i] = Jr * bot.totalarea
-            iv3T.Izo.flat[i] = Jz * self.totalarea
-            iv3T.Ito.flat[i] = Jt * top.totalarea
-            # i += 1
+        # top Junction (no LC into the top on the first pass)
+        Jphoto_t = base_t + np.zeros(npts)
+        ut, Jt = _solve_junction(top, st_t, Vt, Jphoto_t)
+
+        # bot Junction with top -> bot LC
+        JLC_b = bot.beta * junction._jem_arr(ut, Jphoto_t, st_t) * scale_tb
+        Jphoto_b = base_b + JLC_b
+        ur, Jr = _solve_junction(bot, st_b, Vr, Jphoto_b)
+
+        JLC_t = np.zeros(npts)
+        if top.beta > 0.0:  # repeat if backwards LC
+            JLC_t = top.beta * junction._jem_arr(ur, Jphoto_b, st_b) * scale_bt
+            Jphoto_t = base_t + JLC_t
+            ut, Jt = _solve_junction(top, st_t, Vt, Jphoto_t)
+
+            JLC_b = bot.beta * junction._jem_arr(ut, Jphoto_t, st_t) * scale_tb
+            Jphoto_b = base_b + JLC_b
+            ur, Jr = _solve_junction(bot, st_b, Vr, Jphoto_b)
+
+        # extra Z contact
+        if self.Rz == 0.0:
+            Jz = (-Jt * top.totalarea - Jr * bot.totalarea) / self.totalarea  # determine from kirchhoff
+        else:
+            Jz = Vz / self.Rz  # determine from Rz
+
+        # Store ABSOLUTE currents [A] in iv3T.(Iro, Izo, Ito), honouring
+        # the IV3T contract (Idevlist is in Amps). The bottom-terminal
+        # current is the bottom-junction density times bot.totalarea; the
+        # mid-contact current uses the device totalarea (= max(top, bot));
+        # the top-terminal current uses top.totalarea. Equal-area devices
+        # are unaffected because totalarea collapses to a single value.
+        iv3T.Iro = (Jr * bot.totalarea).reshape(iv3T.shape)
+        iv3T.Izo = (Jz * self.totalarea).reshape(iv3T.shape)
+        iv3T.Ito = (Jt * top.totalarea).reshape(iv3T.shape)
+
+        # historical state side-effects: junction JLC left at last point's value
+        if npts:
+            top.JLC = np.float64(JLC_t[-1])
+            bot.JLC = np.float64(JLC_b[-1])
 
         return 0
 
@@ -371,15 +393,12 @@ class Tandem3T(object):
 
         return Iro + Izo + Ito
 
-    def I3Trel(self, iv3T):
-        """
-        calcuate (Jro,Jzo,Jto) mapped -> iv3T.(Iro,Izo,Ito)
-        from RELATIVE iv3T.(Vzt,Vrz,Vtr) ignoring Vtr
-        input class tandem.IV3T object iv3T
+    def _i3t_brent_fallback(self, iv3T):
+        """Solve I3Trel point-by-point with nested bracketed root solves.
 
-        operates on relative voltages, taking the input voltages Vzt and Vrz, and calculates currents while ignoring Vtr.
-        Iteratively adjusts these voltages using resistance models to calculate the current densities. Uses iterative method to find the
-        correct value of Vz that satisfies Kirchhoff's current law across the junctions, adjusting the voltage drop for the z-terminal and checking if the current balances (via _dI function).
+        This handles configurations the vectorized Newton path does not model
+        (mutual/backward LC and resistor-only junctions) and points where
+        Newton fails to converge.
         """
 
         top = self.top  # top Junction
@@ -433,7 +452,7 @@ class Tandem3T(object):
             # iterate with varying Vz
             # bracket
             Vmin = 0.5
-            if math.isfinite(Vzmax) and (abs(Vzmax) > junction.VTOL):
+            if math.isfinite(Vzmax) and (abs(Vzmax) > junction.XTOL_SOLVE):
                 Vlo = min(0, 1.2 * Vzmax)
                 Vhi = max(0, 1.2 * Vzmax)
             else:
@@ -465,7 +484,7 @@ class Tandem3T(object):
                         Vlo,
                         Vhi,
                         args=(Vzt, Vrz, temp3T),
-                        xtol=junction.VTOL,
+                        xtol=junction.XTOL_SOLVE,
                         rtol=junction.EPSREL,
                         maxiter=junction.MAXITER,
                         full_output=False,
@@ -495,6 +514,227 @@ class Tandem3T(object):
             iv3T.Izo.flat[i] = Izo_abs
             iv3T.Ito.flat[i] = Ito_abs
             # i += 1
+
+        iv3T.kirchhoff(["Vzt", "Vrz"])  # Vtr not used so make sure consistent
+        iv3T.kirchhoff(iv3T.Idevlist.copy())  # check for bad results
+        iv3T.Pcalc()  # dev2load defaults
+
+        return 0
+
+    def _i3t_newton(self, Vzt, Vrz, ut, ur, Vz, active0, st_t, st_b):
+        """
+        Vectorized damped Newton for the 3T KCL system with analytic Jacobian.
+
+        Unknowns per point: (ut, ur, Vz) with ut/ur the junction-frame
+        midpoint voltages and Vz the Z-contact voltage. Residuals:
+            F1 = (Vz - Vzt)*pn_t - ut + Jp_t(ut)*Rser_t         [V]
+            F2 = (Vrz + Vz)*pn_r - ur + Jp_r(ur, ut)*Rser_r     [V]
+            F3 = Ito + Iro + Izo                                [A]
+        Forward (top -> bot) luminescent coupling is part of the system:
+        Jp_r depends on ut through JLC_b = beta_b * Jem_t(ut).
+        All points iterate simultaneously; the 3x3 systems are row-scaled and
+        solved with numpy.linalg.solve. Steps are clipped (SPICE-style voltage
+        limiting) because the diode exponential makes undamped Newton overshoot.
+
+        Returns (ut, ur, Vz, converged_mask); non-converged points keep their
+        last iterate and must be handled by the caller (Brent fallback).
+        """
+        top = self.top
+        bot = self.bot
+        pn_t = float(top.pn)
+        pn_r = float(bot.pn)
+        At = float(top.totalarea)
+        Ar = float(bot.totalarea)
+        Az = float(self.totalarea)
+        Rt = float(top.Rser)
+        Rr = float(bot.Rser)
+        Rz = float(self.Rz)
+        scale_tb = At / Ar if At < Ar else 1.0
+        base_t = float(top.Jext * top.lightarea / top.totalarea)
+        base_b = float(bot.Jext * bot.lightarea / bot.totalarea)
+        VL = junction.VLIM_REVERSE
+        VF = junction.VLIM_FORWARD
+
+        ut = ut.copy()
+        ur = ur.copy()
+        Vz = Vz.copy()
+        active = active0.copy()
+        converged = np.zeros_like(active, dtype=bool)
+
+        for _ in range(80):
+            if not active.any():
+                break
+            a = active
+            uta = ut[a]
+            ura = ur[a]
+            Vza = Vz[a]
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                Dt = junction._recomb_current(uta, st_t)
+                Dtp = junction._recomb_current_deriv(uta, st_t)
+                jem = junction._jem_arr(uta, base_t, st_t)
+                jemp = junction._jem_deriv(uta, st_t)
+                Jp_t = base_t - Dt
+                JLC_b = bot.beta * jem * scale_tb
+                Dr = junction._recomb_current(ura, st_b)
+                Drp = junction._recomb_current_deriv(ura, st_b)
+                Jp_r = base_b + JLC_b - Dr
+
+                F1 = (Vza - Vzt[a]) * pn_t - uta + Jp_t * Rt
+                F2 = (Vrz[a] + Vza) * pn_r - ura + Jp_r * Rr
+                F3 = -Jp_t * pn_t * At - Jp_r * pn_r * Ar + Vza / Rz * Az
+
+                dLC = bot.beta * scale_tb * jemp  # dJLC_b/dut
+                J11 = -1.0 - Dtp * Rt
+                J13 = pn_t
+                J21 = dLC * Rr
+                J22 = -1.0 - Drp * Rr
+                J23 = pn_r
+                J31 = Dtp * pn_t * At - dLC * pn_r * Ar
+                J32 = Drp * pn_r * Ar
+                J33 = Az / Rz
+
+                jacobian = np.zeros((F1.size, 3, 3), dtype=np.float64)
+                jacobian[:, 0, 0] = J11
+                jacobian[:, 0, 2] = J13
+                jacobian[:, 1, 0] = J21
+                jacobian[:, 1, 1] = J22
+                jacobian[:, 1, 2] = J23
+                jacobian[:, 2, 0] = J31
+                jacobian[:, 2, 1] = J32
+                jacobian[:, 2, 2] = J33
+                residual = np.column_stack((F1, F2, F3))
+                delta = _solve_scaled_newton_system(jacobian, residual)
+                d1, d2, d3 = delta.T
+
+            bad = ~(np.isfinite(d1) & np.isfinite(d2) & np.isfinite(d3))
+            # damped update (voltage step limiting)
+            d1 = np.clip(d1, -0.5, 0.5)
+            d2 = np.clip(d2, -0.5, 0.5)
+            d3 = np.clip(d3, -1.0, 1.0)
+            ut[a] = np.clip(uta + d1, -VL, VF)
+            ur[a] = np.clip(ura + d2, -VL, VF)
+            Vz[a] = np.clip(Vza + d3, -20.0, 20.0)
+
+            done = (np.abs(d1) < 1e-10) & (np.abs(d2) < 1e-10) & (np.abs(d3) < 1e-10) & ~bad
+            idx = np.flatnonzero(a)
+            converged[idx[done]] = True
+            active[idx[done | bad]] = False
+
+        return ut, ur, Vz, converged
+
+    def I3Trel(self, iv3T):
+        """
+        calcuate (Jro,Jzo,Jto) mapped -> iv3T.(Iro,Izo,Ito)
+        from RELATIVE iv3T.(Vzt,Vrz,Vtr) ignoring Vtr
+        input class tandem.IV3T object iv3T
+
+        Solves the Kirchhoff current balance across the Z contact for every
+        point simultaneously: a vectorized initial pass (Rz folded into the
+        junction series resistances at Vz = 0, matching the historical seed)
+        followed by damped Newton with analytic Jacobian on the full system
+        (see _i3t_newton). Points that fail to converge, and
+        configurations the Newton system does not model (backward/mutual LC,
+        resistor-only junctions), use the point-by-point Brent fallback.
+        """
+        top = self.top
+        bot = self.bot
+
+        if top.beta > 0.0 or top.notdiode() or bot.notdiode():
+            return self._i3t_brent_fallback(iv3T)
+
+        inlist = iv3T.Vdevlist.copy()  # ['Vzt','Vrz','Vtr']
+        outlist = iv3T.Idevlist.copy()
+        err = iv3T.init(inlist, outlist)  # initialize output
+        if err:
+            return err
+
+        st_t = top._solver_state()
+        st_b = bot._solver_state()
+        pn_t = float(top.pn)
+        pn_r = float(bot.pn)
+        At = float(top.totalarea)
+        Ar = float(bot.totalarea)
+        Az = float(self.totalarea)
+        Rt = float(top.Rser)
+        Rr = float(bot.Rser)
+        Rz = float(self.Rz)
+        scale_tb = At / Ar if At < Ar else 1.0
+        base_t = float(top.Jext * top.lightarea / top.totalarea)
+        base_b = float(bot.Jext * bot.lightarea / bot.totalarea)
+
+        Vzt = np.asarray(iv3T.Vzt, dtype=np.float64).ravel()
+        Vrz = np.asarray(iv3T.Vrz, dtype=np.float64).ravel()
+        npts = Vzt.size
+        finite_in = np.isfinite(Vzt) & np.isfinite(Vrz)
+
+        # stage 1: seed exactly like the historical initial guess -- fold Rz
+        # into each junction's Rser and evaluate at Vz = 0
+        ut = top._vmid_arr((0.0 - Vzt) * pn_t, base_t, state=st_t, Rser=Rt + Rz)
+        Jp_t = base_t - junction._recomb_current(ut, st_t)
+        JLC_b = bot.beta * junction._jem_arr(ut, base_t, st_t) * scale_tb
+        Jphoto_b = base_b + JLC_b
+        ur = bot._vmid_arr((Vrz + 0.0) * pn_r, Jphoto_b, state=st_b, Rser=Rr + Rz)
+        Jp_r = Jphoto_b - junction._recomb_current(ur, st_b)
+        Jt = -Jp_t * pn_t
+        Jr = -Jp_r * pn_r
+        Jz = (-Jt * At - Jr * Ar) / Az  # Kirchhoff with Rz folded in
+
+        Iro = np.full(npts, np.nan)
+        Izo = np.full(npts, np.nan)
+        Ito = np.full(npts, np.nan)
+        seeded = finite_in & np.isfinite(ut) & np.isfinite(ur)
+
+        if Rz == 0.0:
+            # Vz = 0 exactly; the stage-1 solution is the full solution
+            # (matches the historical Rz == 0 branch)
+            Iro[seeded] = (Jr * Ar)[seeded]
+            Izo[seeded] = (Jz * Az)[seeded]
+            Ito[seeded] = (Jt * At)[seeded]
+            fallback = finite_in & ~seeded
+        else:
+            with np.errstate(invalid="ignore"):
+                Vz0 = np.clip(np.nan_to_num(Jz * Rz, nan=0.0), -20.0, 20.0)
+            ut, ur, Vz, conv = self._i3t_newton(Vzt, Vrz, ut, ur, Vz0, seeded, st_t, st_b)
+
+            # verify the converged points against the residuals
+            with np.errstate(over="ignore", invalid="ignore"):
+                Jp_t = base_t - junction._recomb_current(ut, st_t)
+                JLC_b = bot.beta * junction._jem_arr(ut, base_t, st_t) * scale_tb
+                Jp_r = base_b + JLC_b - junction._recomb_current(ur, st_b)
+                Ito_n = -Jp_t * pn_t * At
+                Iro_n = -Jp_r * pn_r * Ar
+                Izo_n = Vz / Rz * Az
+                F1 = (Vz - Vzt) * pn_t - ut + Jp_t * Rt
+                F2 = (Vrz + Vz) * pn_r - ur + Jp_r * Rr
+                F3 = Ito_n + Iro_n + Izo_n
+                good = conv & (np.abs(F1) < 1e-6) & (np.abs(F2) < 1e-6) & (np.abs(F3) <= 1e-8 * (np.abs(Ito_n) + np.abs(Iro_n) + np.abs(Izo_n)) + 1e-12)
+
+            Iro[good] = Iro_n[good]
+            Izo[good] = Izo_n[good]
+            Ito[good] = Ito_n[good]
+            fallback = finite_in & ~good
+
+        if np.any(fallback):
+            # Nested-Brent path for the stragglers only.
+            sub = IV3T(name=iv3T.name + "_fb", meastype=iv3T.meastype, shape=int(fallback.sum()), area=iv3T.area)
+            sub.Vzt[:] = Vzt[fallback]
+            sub.Vrz[:] = Vrz[fallback]
+            sub.Vtr[:] = -Vzt[fallback] - Vrz[fallback]
+            self._i3t_brent_fallback(sub)
+            Iro[fallback] = sub.Iro
+            Izo[fallback] = sub.Izo
+            Ito[fallback] = sub.Ito
+
+        iv3T.Iro = Iro.reshape(iv3T.shape)
+        iv3T.Izo = Izo.reshape(iv3T.shape)
+        iv3T.Ito = Ito.reshape(iv3T.shape)
+
+        # state side-effects analogous to V3T/J3Tabs: junction JLC left at the
+        # last point's self-consistent value (top gets none in the forward-only
+        # LC configuration this path handles)
+        if npts:
+            top.JLC = np.float64(0.0)
+            bot.JLC = np.float64(bot.beta * junction._jem_arr(ut[-1:], base_t, st_t)[0] * scale_tb)
 
         iv3T.kirchhoff(["Vzt", "Vrz"])  # Vtr not used so make sure consistent
         iv3T.kirchhoff(iv3T.Idevlist.copy())  # check for bad results
@@ -714,9 +954,9 @@ class Tandem3T(object):
             else:
                 lnt.line("Ito", Isct, Isct / less, pnts, "Iro", str(Impr))
                 self.V3T(lnt)
-            aPt = getattr(lnt, "Ptot")
-            aVzt = getattr(lnt, "Vzt")
-            aIto = getattr(lnt, "Ito")
+            aPt = lnt.Ptot
+            aVzt = lnt.Vzt
+            aIto = lnt.Ito
             nt = np.argmax(aPt)
             Vmpt = aVzt[nt]
             Impt = aIto[nt]
@@ -732,9 +972,9 @@ class Tandem3T(object):
             else:
                 lnr.line("Iro", Iscr, Iscr / less, pnts, "Ito", str(Impt))
                 self.V3T(lnr)
-            aPr = getattr(lnr, "Ptot")
-            aVrz = getattr(lnr, "Vrz")
-            aIro = getattr(lnr, "Iro")
+            aPr = lnr.Ptot
+            aVrz = lnr.Vrz
+            aIro = lnr.Iro
             nr = np.argmax(aPr)
             Vmpr = aVrz[nr]
             Impr = aIro[nr]
@@ -760,7 +1000,7 @@ class Tandem3T(object):
         te = time()
         dt = te - ts
         if bplot:
-            print("MPP: {0:d}pnts , {1:2.4f} s".format(pnts, dt))
+            print(f"MPP: {pnts:d}pnts , {dt:2.4f} s")
 
         return pt
 
@@ -822,7 +1062,7 @@ class Tandem3T(object):
             # top
             tmptop = self.top.copy()  # copy for temporary calculations
             tmptop.set(name="tmptop", Rser=top.Rser + self.Rz / self.totalarea * top.totalarea, JLC=0.0)  # correct Rz by area ratio
-            Vtmid = tmptop.Vmid(pt.Vzt[0] * top.pn) * top.pn
+            Vtmid = float(tmptop.Vmid(pt.Vzt[0] * top.pn)) * top.pn
             pt.Ito[0] = -tmptop.Jparallel(Vtmid * top.pn, tmptop.Jphoto) * top.pn * top.totalarea
             pt.Izo[0] = -pt.Ito[0]  # from Kirchhoff
             self.V3T(pt)  # calc Vs from Is
@@ -833,17 +1073,17 @@ class Tandem3T(object):
             pt.Vrz[0] = 0.0
             # top
             tmptop = self.top.copy()  # copy for temporary calculations
-            tmptop.set(name="tmptop")
-            tmptop.JLC = 0.0
-            Vtmid = tmptop.Vdiode(pt.Ito[0] / top.totalarea * top.pn) * top.pn
+            tmptop.set(name="tmptop", JLC=0.0)
+            Vtmid = float(tmptop.Vdiode(pt.Ito[0] / top.totalarea * top.pn)) * top.pn
             # bot
             tmpbot = self.bot.copy()
             tmpbot.set(name="tmpbot", Rser=bot.Rser + self.Rz / self.totalarea * bot.totalarea)  # correct Rz by area ratio
-            tmpbot.JLC = bot.beta * tmptop.Jem(Vtmid * top.pn)  # top to bot LC
+            JLC = bot.beta * tmptop.Jem(Vtmid * top.pn)  # top to bot LC
             if top.totalarea < bot.totalarea:  # distribute LC over total area
-                tmpbot.JLC *= top.totalarea / bot.totalarea
+                JLC *= top.totalarea / bot.totalarea
+            tmpbot.set(JLC=JLC)
 
-            Vrmid = tmpbot.Vmid(pt.Vrz[0] * bot.pn) * bot.pn
+            Vrmid = float(tmpbot.Vmid(pt.Vrz[0] * bot.pn)) * bot.pn
             pt.Iro[0] = -tmpbot.Jparallel(Vrmid * bot.pn, tmpbot.Jphoto) * bot.pn * bot.totalarea
             pt.Izo[0] = -pt.Iro[0]  # Kirchhoff
             self.V3T(pt)  # calc Vs from Is
@@ -860,7 +1100,7 @@ class Tandem3T(object):
                 pt.nanpnt(0)
             else:  # s-type
                 dev2T = Multi2T.from_3T(self)
-                pt.Iro[0] = dev2T.I2T(pt.Vtr[0])
+                pt.Iro[0] = dev2T.I2Troot(pt.Vtr[0])
                 pt.Ito[0] = -pt.Iro[0]
             self.V3T(pt)  # calc Vs from Is
 

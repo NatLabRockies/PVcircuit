@@ -3,4 +3,4 @@ MPPVM21: <pvcircuit.iv3T.IV3T class>
 sizes(1, 1)
 
  #     mIro     mIzo     mIto     Vzt      Vrz      Vtr      mIA      mIB       VA       VB     mPtot    mIxhex   mIyhex   Vxhex    Vyhex  
-(0,) -14.09    0.87     13.17    1.307    0.653   -1.960   -14.09    13.17    0.653   -1.307    26.40   -19.27    1.03     2.310    0.754  
+(0,) -14.08    0.92     13.17    1.307    0.653   -1.960   -14.08    13.17    0.653   -1.307    26.41   -19.27    1.06     2.310    0.754  

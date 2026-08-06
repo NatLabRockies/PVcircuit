@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
+# noqa: N999
 """
 This is the PVcircuit Package.
     pvcircuit.IV3T()       # many forms of operational conditions of 3T tandems
-"""
+"""  
 
 import copy
 import math  # simple math
@@ -11,10 +11,10 @@ import re
 from typing import Any
 
 import matplotlib.pyplot as plt  # plotting
-from matplotlib.legend import Legend
 import numpy as np  # arrays
 import pandas as pd  # data frames
 from loguru import logger
+from matplotlib.legend import Legend
 
 # conversion matrices
 SQ2 = math.sqrt(2.0)
@@ -72,7 +72,7 @@ CZ:A = RZ, B = TZ
 """
 
 
-class IV3T(object):
+class IV3T:
     """Operational state of a 3-terminal tandem.
 
     All array attributes have the same shape (set at construction). A scalar
@@ -241,9 +241,7 @@ class IV3T(object):
                     sval = "".center(width)
                 strline += sval
 
-            if i < prntmax:  # head
-                strout += strline
-            elif i > imax - prntmax:  # tail
+            if i < prntmax or i > imax - prntmax:  # head
                 strout += strline
             elif i == prntmax:
                 strout += "\n\n"
@@ -251,7 +249,7 @@ class IV3T(object):
         # Clean string from numpy types present after numpy > 2.x.x
         strout = re.sub(r"np\.(?:int|float|int64|float64)\(([^)]+)\)", r"\1", strout)
         # replace negative 0
-        strout = re.sub(r'-0\.(0+)\b', r'0.\1 ', strout)
+        strout = re.sub(r"-0\.(0+)\b", r"0.\1 ", strout)
 
         return strout
 
@@ -375,7 +373,6 @@ class IV3T(object):
             z1 = np.nanmax(zd) * scale
 
             for ycon in [step * i for i in range(-maxlines, maxlines) if y0 <= step * i <= y1]:
-
                 xalt0 = -ycon - z1
                 xalt1 = -ycon - z0
                 hex3T.line(xkey, max(x0, xalt0), min(x1, xalt1), xn, ykey, str(ycon))  # define a line
@@ -705,9 +702,7 @@ class IV3T(object):
             # The hex -> dev inverse matrix is singular
             # raise for now to prevent incorrect results from placeholder
             raise NotImplementedError(
-                "convert(VorI, 'hex2dev', ...) is not implemented: the hex->dev "
-                "transformation matrix is singular and the placeholder in this "
-                "module would produce incorrect results."
+                "convert(VorI, 'hex2dev', ...) is not implemented: the hex->dev transformation matrix is singular and the placeholder in this module would produce incorrect results."
             )
         elif oper == "load2dev":
             inlist = loadlist
@@ -733,31 +728,22 @@ class IV3T(object):
                 inarray2 = getattr(self, inlist[2])
             else:
                 inarray2 = np.zeros(self.shape)
-
-            # initialize local empty output to same size
-            outarray0 = np.full(self.shape, np.nan, dtype=np.float64)
-            outarray1 = np.full(self.shape, np.nan, dtype=np.float64)
-            outarray2 = np.full(self.shape, np.nan, dtype=np.float64)
         else:
             return 4  # klist arrays not same length
 
-        i = 0
-        for in0, in1, in2 in zip(inarray0.flat, inarray1.flat, inarray2.flat):
-            vector_in = np.array([in0, in1, in2])
-            vector_out = matrix @ vector_in
-            outarray0.flat[i] = vector_out[0]
-            outarray1.flat[i] = vector_out[1]
-            outarray2.flat[i] = vector_out[2]
-            i += 1
+        # apply the 3x3 transform to all points at once
+        stacked = np.vstack((np.ravel(inarray0), np.ravel(inarray1), np.ravel(inarray2)))
+        out = np.asarray(matrix, dtype=np.float64) @ stacked
 
-        setattr(self, outlist[0], outarray0)
-        setattr(self, outlist[1], outarray1)
+        setattr(self, outlist[0], out[0].reshape(self.shape))
+        setattr(self, outlist[1], out[1].reshape(self.shape))
         if len(outlist) == 3:  # otherwise they are just zeros
-            setattr(self, outlist[2], outarray2)
+            setattr(self, outlist[2], out[2].reshape(self.shape))
 
         return 0
+
     @classmethod
-    def from_csv(cls,name, path, fileA, fileB, VorI, meastype, Iscale=1000.0, area=1):
+    def from_csv(cls, name, path, fileA, fileB, VorI, meastype, Iscale=1000.0, area=1):
         """
         import csv file as data table into iv3T object
         two 2D arrays with x and y index on top and left
@@ -1074,12 +1060,12 @@ class IV3T(object):
 
         Rax.set_prop_cycle(plt.rcParams["axes.prop_cycle"])  # reset color cycle
         for i in range(0, na, step):  # rear
-            kwargs["label"] = labelplus + ykey + "={0:.1f}".format(self.y[i])
+            kwargs["label"] = labelplus + ykey + f"={self.y[i]:.1f}"
             Rax.plot(Vxp[i, :], Ixp[i, :], **kwargs)
 
         Lax.set_prop_cycle(plt.rcParams["axes.prop_cycle"])  # reset color cycle
         for i in range(0, nb, step):  # top
-            kwargs["label"] = labelplus + xkey + "={0:.1f}".format(self.x[i])
+            kwargs["label"] = labelplus + xkey + f"={self.x[i]:.1f}"
             Lax.plot(Vyp[:, i], Iyp[:, i], **kwargs)
 
         if inplots is None:

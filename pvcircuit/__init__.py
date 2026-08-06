@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 This is the PVcircuit Package.
 Model tandem and multijunction solar cells
@@ -31,12 +30,14 @@ notebook_datapath = pvcpath.parent.joinpath(r"notebooks/notebook_data")
 
 # Submodule imports must follow the path constants above because each of these
 # modules touches ``pvc.pvcpath`` / ``pvc.datapath`` at import time.
-import pvcircuit.EY as EY  # noqa: E402
-import pvcircuit.iv3T as iv3T  # noqa: E402
-import pvcircuit.junction as junction  # noqa: E402
-import pvcircuit.multi2T as multi2T  # noqa: E402
-import pvcircuit.qe as qe  # noqa: E402
-import pvcircuit.tandem3T as tandem3T  # noqa: E402
+from pvcircuit import (
+    EY,
+    iv3T,
+    junction,
+    multi2T,
+    qe,
+    tandem3T,
+)
 
 # expose constructors to package's top level
 Junction = junction.Junction
@@ -62,4 +63,4 @@ __email__ = "john.geisz@nrel.gov"
 __url__ = "https://github.nrel.gov/jgeisz/PVcircuit"
 __version__ = VERSION
 __release__ = "development"
-__all__ = ["junction", "multi2T", "iv3T", "tandem3T", "qe", "EY"]
+__all__ = ["EY", "iv3T", "junction", "multi2T", "qe", "tandem3T"]

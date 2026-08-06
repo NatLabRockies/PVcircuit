@@ -3,4 +3,4 @@ IzoVxhex: <pvcircuit.iv3T.IV3T class>
 sizes(1, 1)
 
  #     mIro     mIzo     mIto     Vzt      Vrz      Vtr      mIA      mIB       VA       VB     mPtot    mIxhex   mIyhex   Vxhex    Vyhex  
-(0,) -14.00    0.00     14.00    0.053    0.000   -0.053   -14.00    14.00    0.000   -0.053    0.75    -19.80    0.00     0.075    0.000  
+(0,) -14.00    0.00     14.00   0.000    0.000     0.000   -14.00    14.00   0.000     0.000    0.00    -19.80    0.00    0.000    0.000   
