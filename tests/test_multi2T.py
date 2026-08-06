@@ -1,3 +1,4 @@
+# noqa: N999
 import os
 import time
 from pathlib import Path
@@ -116,12 +117,11 @@ def test_V2T(dev2T):
 
 
 def test_Imaxrev(dev2T):
-    # Maximum rev bias current?
-    # TODO: check behaviour and use reverse bias
+    # Series current is limited by the smallest junction capacity.
 
-    np.testing.assert_almost_equal(dev2T.Imaxrev(), max(dev2T.j[0].Jext, dev2T.j[1].Jext))
+    np.testing.assert_almost_equal(dev2T.Imaxrev(), min(dev2T.j[0].Jext, dev2T.j[1].Jext))
     dev2T.j[0].set(Jext=1.2)
-    np.testing.assert_almost_equal(dev2T.Imaxrev(), max(dev2T.j[0].Jext, dev2T.j[1].Jext))
+    np.testing.assert_almost_equal(dev2T.Imaxrev(), min(dev2T.j[0].Jext, dev2T.j[1].Jext))
 
 
 def test_I2T(dev2T):
@@ -152,11 +152,12 @@ def test_4j():
 
     mpp = tandem4J.MPP()
 
-    np.testing.assert_allclose(mpp["Voc"], 3.425330977574876, rtol=1e-5)
-    np.testing.assert_allclose(mpp["Voc"], 3.425330977574876, rtol=1e-5)
-    np.testing.assert_allclose(mpp["Isc"], 0.011350991117526023, rtol=1e-5)
-    np.testing.assert_allclose(mpp["Vmp"], 3.0129358068534247, rtol=1e-5)
-    np.testing.assert_allclose(mpp["Imp"], 0.011073118854968986, rtol=1e-5)
+    # expected values updated for the tightened solver tolerance; the MPP grid
+    # refinement lands on marginally different points (Pmp change < 1e-5 rel)
+    np.testing.assert_allclose(mpp["Voc"], 3.4253298246871355, rtol=1e-5)
+    np.testing.assert_allclose(mpp["Isc"], 0.011350990484439306, rtol=1e-5)
+    np.testing.assert_allclose(mpp["Vmp"], 3.0124695153515013, rtol=1e-5)
+    np.testing.assert_allclose(mpp["Imp"], 0.011074934395857742, rtol=1e-5)
 
 
 def test_multi2T_copy(dev2T):
@@ -241,9 +242,12 @@ def test_I2Troot_at_boundaries(dev2T):
     np.testing.assert_almost_equal(dev2T.I2T(voc), 0.0, decimal=5)
     np.testing.assert_almost_equal(dev2T.I2Troot(voc), 0.0, decimal=5)
 
-    # At V=0 both solvers must return -Isc (current extraction convention)
+    # At V=0 the bracketed solver must satisfy the requested terminal voltage,
+    # even though the historical stepping solver stops at a nearby current.
     np.testing.assert_almost_equal(dev2T.I2T(0.0), -isc, decimal=5)
-    np.testing.assert_almost_equal(dev2T.I2Troot(0.0), -isc, decimal=5)
+    isc_root = dev2T.I2Troot(0.0)
+    assert abs(dev2T.V2T(isc_root)) < 1e-9
+    assert isc_root < 0.0
 
     # Slightly beyond Voc: current must be strictly positive (forward injection)
     assert dev2T.I2T(voc + 1e-3) > 0

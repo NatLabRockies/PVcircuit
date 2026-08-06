@@ -4,10 +4,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pvcircuit as pvc
 import pytest
-from pvcircuit import Multi2T
 from pvlib import ivtools, pvsystem
+
+import pvcircuit as pvc
+from pvcircuit import Multi2T
 
 # Set to True once to write baseline test files, then revert to False
 REGENERATE_TEST_FILES = False
@@ -145,6 +146,50 @@ def test_junction_j0init(junction_2d):
     np.testing.assert_allclose(junction_2d.J0ratio, [7.609626, 2.75855506])
 
 
+def test_j0_log_domain_avoids_intermediate_underflow():
+    junction = pvc.junction.Junction(n=[0.039], J0ratio=[1e300])
+
+    with np.errstate(under="ignore"):
+        direct_power = (junction.Jdb / pvc.junction.J0_REFERENCE) ** (1.0 / junction.n[0])
+    assert direct_power == 0.0
+
+    expected_log_j0 = (
+        np.log(pvc.junction.J0_REFERENCE)
+        + np.log(junction.J0ratio[0])
+        + np.log(junction.Jdb / pvc.junction.J0_REFERENCE) / junction.n[0]
+    )
+    saturation_current = junction.J0
+    assert np.log(saturation_current[0]) == pytest.approx(expected_log_j0)
+
+    junction._J0init(saturation_current)
+    np.testing.assert_allclose(junction.J0ratio, [1e300], rtol=1e-12)
+
+
+def test_recombination_product_avoids_intermediate_overflow():
+    junction = pvc.junction.Junction(n=[0.1], J0ref=[1e-300], Jext=0.0)
+    state = junction._solver_state()
+    voltage = 720.0 * junction.n[0] * junction.Vth
+    expected = np.exp(np.log(junction.J0[0]) + 720.0)
+
+    with np.errstate(over="ignore"):
+        assert np.isinf(junction.J0[0] * np.expm1(720.0))
+
+    vectorized = pvc.junction._recomb_current(np.array([voltage]), state)[0]
+    scalar = pvc.junction._recomb_current_scalar(voltage, state)
+    np.testing.assert_allclose(vectorized, expected, rtol=1e-13)
+    np.testing.assert_allclose(scalar, expected, rtol=1e-13)
+
+
+def test_scaled_derivative_recovers_underflowed_exponential():
+    expected = np.exp(np.log(1e300) - 800.0)
+
+    with np.errstate(under="ignore"):
+        assert 1e300 * np.exp(-800.0) == 0.0
+
+    actual = pvc.junction._scaled_exp(1e300, -800.0)
+    np.testing.assert_allclose(actual, expected, rtol=1e-13)
+
+
 def test_jem(junction_2d):
 
     np.testing.assert_almost_equal(junction_2d.Jem(0.6), 1.8227873411146403e-06)
@@ -195,14 +240,16 @@ def test_JshuntRBB(junction_2d):
 
 def test_Vdiode(junction_2d):
 
-    np.testing.assert_almost_equal(junction_2d.Vdiode(0), 0.7849550554937345)
+    # expected values updated for the tightened solver tolerance (xtol 1e-4 -> 1e-11);
+    # shifts are < 1e-5 V, within the old solver's own error bars
+    np.testing.assert_almost_equal(junction_2d.Vdiode(0), 0.7849544537913467)
     np.testing.assert_almost_equal(junction_2d.Vdiode(-40e-3), 0, decimal=5)
     np.testing.assert_equal(junction_2d.Vdiode(-41e-3), np.nan)  # VLIM_REVERSE
 
     junction_2d.set(RBB="bishop", Gsh=1e-4)
-    np.testing.assert_almost_equal(junction_2d.Vdiode(-41e-3), -9.652384228088378)
+    np.testing.assert_almost_equal(junction_2d.Vdiode(-41e-3), -9.652390520409787)
     junction_2d.set(RBB="JFG")
-    np.testing.assert_almost_equal(junction_2d.Vdiode(-41e-3), -0.9224606102628319)
+    np.testing.assert_almost_equal(junction_2d.Vdiode(-41e-3), -0.9224612808482097)
 
     junction_2d.set(J0ratio=[0, 0])
     np.testing.assert_almost_equal(junction_2d.Vdiode(-41e-3), 0)
@@ -274,7 +321,7 @@ def test_junction_Jparallel(junction_2d):
     """Jparallel(V, Jtot) zeroes out at the V that Vdiode(Jdiode) finds."""
 
     # At Vdiode(Jdiode=0), Jtot = Jphoto and Jparallel must vanish
-    # (only to Brent solver tolerance, which is VTOL ~ 1e-6).
+    # to the scalar Brent voltage tolerance.
     v = junction_2d.Vdiode(0)
     residual = junction_2d.Jparallel(v, junction_2d.Jphoto)
     np.testing.assert_almost_equal(residual, 0.0, decimal=5)
@@ -359,13 +406,11 @@ if __name__ == "__main__":
     # Jext = photocurrent / A  # [A/cm^2]
     # n = nNsVth / pvc.junction.Vth(TC)
     # J0ref = saturation_current / A
-    # J0scale = 1000
     # Rser = resistance_series * A
     # Gsh = 1 / (resistance_shunt * A)
     # # pvc.junction.DB_PREFIX
     # Jdb = pvc.junction.Jdb(TC=TC, Eg=Eg)
-    # # j0=(self.Jdb * self.J0scale)**(1./self.n) * self.J0ratio / self.J0scale
-    # J0ratio = J0scale * J0ref / (Jdb * J0scale) ** (1.0 / n)
+    # J0ratio = (J0ref / pvc.junction.J0_REFERENCE) / (Jdb / pvc.junction.J0_REFERENCE) ** (1.0 / n)
 
     # PVK = Multi2T(name="Psk", area=A, Jext=Jext, Eg_list=[Eg], n=[n], J0ratio=[J0ratio])
     # PVK.set(Rs2T=Rser, Gsh=Gsh)
