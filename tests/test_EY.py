@@ -553,6 +553,182 @@ def test_meteo_filter_methods(meteo):
 
 
 #################################################
+# Regression tests for the 2026-08 EY audit
+#################################################
+
+
+def _synthetic_meteo(ndays=2, freq="h", start="2020-06-01"):
+    """Regular hourly timeline with a sinusoidal day and zero-irradiance nights."""
+    t = pd.date_range(start, periods=24 * ndays, freq=freq)
+    wl = np.linspace(280, 4000, 373)
+    hour = t.hour.values
+    irr = np.where((hour >= 6) & (hour <= 18), np.sin(np.pi * (hour - 6) / 12) * 1000, 0.0)  # W/m^2
+    spec = pd.DataFrame(np.outer(irr, np.ones_like(wl) / (wl[-1] - wl[0])), index=t)
+    m = Meteo(wl, spec, pd.Series(20.0, index=t), pd.Series(1.0, index=t), t)
+    return m, irr, t
+
+
+def _populate(m, irr, jsc_top=20.0, jsc_bot=18.0):
+    m.add_currents(irr / 1000 * jsc_top)
+    m.add_currents(irr / 1000 * jsc_bot)
+    m.add_bandgaps(np.full(len(irr), 1.7))
+    m.add_bandgaps(np.full(len(irr), 1.1))
+    return m
+
+
+def test_time_weights_match_trapezoid():
+    from pvcircuit.EY import _time_weights
+
+    t = pd.date_range("2020-01-01", periods=30, freq="h")
+    y = np.random.default_rng(0).random(30)
+    w = _time_weights(t)
+    np.testing.assert_allclose(np.sum(y * w), trapezoid(y, (t - t[0]).total_seconds()))
+    # irregular timeline
+    sel = [0, 1, 2, 5, 6, 10, 20, 29]
+    t2 = t[sel]
+    y2 = y[sel]
+    np.testing.assert_allclose(np.sum(y2 * _time_weights(t2)), trapezoid(y2, (t2 - t2[0]).total_seconds()))
+    assert len(_time_weights(t[:1])) == 1 and len(_time_weights(t[:0])) == 0
+
+
+def test_run_ey_2T_night_rows_not_nan():
+    """Multi2T.MPP() returns NaN at zero photocurrent; the yield must still be finite."""
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    _populate(m, irr)
+    energy_out, eff = m.run_ey(pvc.Multi2T(), "CM", multiprocessing=False)
+    assert np.isfinite(energy_out) and energy_out > 0
+    assert 0 < eff < 1
+    assert np.all(np.isfinite(m.results.to_numpy()))
+    # night rows give exactly zero output
+    assert np.all(m.results["Pmp"].to_numpy()[irr == 0] == 0)
+    # and the same device as Tandem3T CM gives (nearly) the same yield
+    m3, irr3, _ = _synthetic_meteo(ndays=1)
+    _populate(m3, irr3)
+    energy_out_3T, _ = m3.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+    np.testing.assert_allclose(energy_out, energy_out_3T, rtol=2e-2)
+
+
+def test_run_ey_nan_jsc_rows_zero_output():
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    jsc = irr / 1000 * 20.0
+    jsc[12] = np.nan  # noon row missing
+    m.add_currents(jsc)
+    m.add_currents(irr / 1000 * 18.0)
+    m.add_bandgaps(np.full(len(irr), 1.7))
+    m.add_bandgaps(np.full(len(irr), 1.1))
+    energy_out, _ = m.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+    assert np.isfinite(energy_out)
+    assert m.results["Pmp"].iloc[12] == 0
+
+
+def test_filtered_meteo_energy_in_no_gap_bridging():
+    """Dropping night rows must not let the integral bridge sunset -> sunrise."""
+    m, irr, _ = _synthetic_meteo(ndays=10)
+    e_full = m.energy_in
+    day = irr > 0
+    e_day = np.sum(irr[day] * m.dt.to_numpy()[day]) / 3600 / 1000
+
+    mf = m.filter_ape()  # drops the all-zero (night) rows
+    assert len(mf.datetime) == day.sum()
+    np.testing.assert_allclose(mf.energy_in, e_day, rtol=1e-12)
+    # previously: trapezoid over the gappy timeline inflated this by ~18 %
+    assert mf.energy_in <= e_full * (1 + 1e-12)
+
+    keep = irr > 300  # drops the 07:00 / 17:00 rows (259 W/m^2) as well as night
+    mc = m.filter_custom(m.irradiance.to_numpy() > 300)
+    np.testing.assert_allclose(mc.energy_in, np.sum(irr[keep] * m.dt.to_numpy()[keep]) / 3600 / 1000)
+    assert mc.energy_in < e_full
+
+    # yield on the filtered copy equals the sum over the same rows of the full run
+    _populate(m, irr)
+    m.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+    mf2 = m.filter_custom(keep)
+    e_out_filtered, _ = mf2.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+    e_out_full_rows = np.sum(m.results["Pmp"].to_numpy()[keep] / pvc.Tandem3T().totalarea * m.dt.to_numpy()[keep]) / 3.6e3 / 1e3 * 1e4
+    np.testing.assert_allclose(e_out_filtered, e_out_full_rows, rtol=1e-6)
+
+
+def test_run_ey_column_count_check():
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    for k in range(3):
+        m.add_currents(irr / 1000 * (20 - k))  # 3 columns
+    m.add_bandgaps(np.full(len(irr), 1.7))
+    m.add_bandgaps(np.full(len(irr), 1.1))
+    with pytest.raises(ValueError, match="jscs has 3 columns"):
+        m.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+    with pytest.raises(ValueError, match="jscs has 3 columns"):
+        m.run_ey(pvc.Multi2T(), "CM", multiprocessing=False)
+    m2, irr2, _ = _synthetic_meteo(ndays=1)
+    m2.add_currents(irr2 / 1000 * 20)
+    m2.add_bandgaps(np.full(len(irr2), 1.7))
+    m2.add_bandgaps(np.full(len(irr2), 1.1))
+    with pytest.raises(ValueError, match="jscs has 1 columns"):
+        m2.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+    m3, _, _ = _synthetic_meteo(ndays=1)
+    with pytest.raises(ValueError, match="add_currents"):
+        m3.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+
+
+def test_meteo_input_validation():
+    m, _, t = _synthetic_meteo(ndays=1)
+    wl = m.wavelength
+    with pytest.raises(ValueError, match="row-aligned"):
+        Meteo(wl, m.spectra, pd.Series(20.0, index=t[:-1]), pd.Series(1.0, index=t), t)
+    with pytest.raises(ValueError, match="spectra must be"):
+        Meteo(wl[:-1], m.spectra, pd.Series(20.0, index=t), pd.Series(1.0, index=t), t)
+    # a RangeIndex on the spectra is fine (positional alignment)
+    m2 = Meteo(wl, m.spectra.reset_index(drop=True), pd.Series(20.0, index=t), pd.Series(1.0, index=t), t)
+    assert len(m2.datetime) == len(t)
+    np.testing.assert_allclose(m2.energy_in, m.energy_in)
+
+
+def test_reindex_aligns_numpy_arrays_and_energy_in():
+    m, irr, t = _synthetic_meteo(ndays=2)
+    _populate(m, irr)
+    m.calc_ape()
+    new_idx = t[::2] + pd.Timedelta(seconds=10)
+    r = m.reindex(new_idx, method="nearest", tolerance=pd.Timedelta(seconds=30))
+    assert len(r.datetime) == len(r.cell_temp) == len(r.spectra) == len(r.dt) == len(new_idx)
+    assert r.jscs.shape == (len(new_idx), 2)
+    assert r.bandgaps.shape == (len(new_idx), 2)
+    assert len(r.average_photon_energy) == len(new_idx)
+    np.testing.assert_allclose(r.jscs[:, 0], m.jscs[::2, 0])
+    # 2-hourly weights -> trapezoid on the coarser grid
+    np.testing.assert_allclose(r.energy_in, trapezoid(irr[::2], (t[::2] - t[0]).total_seconds()) / 3600 / 1000)
+    # unmatched rows become NaN and are excluded from energy_in
+    far = t[::2] + pd.Timedelta(minutes=20)
+    r2 = m.reindex(far, method="nearest", tolerance=pd.Timedelta(seconds=30))
+    assert np.all(np.isnan(r2.jscs))
+    assert r2.energy_in == 0.0
+    energy_out, _ = r.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+    assert np.isfinite(energy_out)
+
+
+def test_tandem3T_set_per_junction():
+    d = pvc.Tandem3T()
+    d.set(n=[[1.5], [1.0]], J0ratio=[[10.0], [20.0]])
+    np.testing.assert_array_equal(d.top.n, [1.5])
+    np.testing.assert_array_equal(d.bot.n, [1.0])
+    d.set(Rser=[1.0, 2.0])
+    assert d.top.Rser == 1.0 and d.bot.Rser == 2.0
+    d2 = pvc.Tandem3T()
+    d2.set(n=[1.5, 1.0], J0ratio=[10, 20])  # flat: same two-diode model in both junctions
+    np.testing.assert_array_equal(d2.top.n, [1.5, 1.0])
+    np.testing.assert_array_equal(d2.bot.n, [1.5, 1.0])
+
+
+def test_temperature_model_stores_ref_value(tc_eqet):
+    eg_T = np.array(tc_eqet.calc_Eg_Rau()[0])
+    model = TemperatureModel.fit(tc_eqet.temperature.astype(float), eg_T, model_types=[ModelType.LINEAR], Tref=25)
+    assert model.Tref == 25
+    assert model.ref_value is not None
+    np.testing.assert_allclose(float(model.apply(25.0)), model.ref_value)
+    np.testing.assert_allclose(model.apply(np.array([10.0, 40.0])), model.apply(np.array([10.0, 40.0]), model.ref_value))
+    with pytest.raises(ValueError, match="no ref_value"):
+        TemperatureModel(ModelType.LINEAR, model.params).apply(25.0)
+
+
+#################################################
 # Test-file generator
 #################################################
 

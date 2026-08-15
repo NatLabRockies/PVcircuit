@@ -55,16 +55,37 @@ def test_Jint():
     eqe = EQE(waves, eq)
 
     eqe.add_spectra(wvl, AM15G.T)
-    test_res = np.array([46.42154037])
+    # Jint() always returns the (n_eqe, n_spectra) matrix
+    test_res = np.array([[46.42154037]])
     np.testing.assert_array_almost_equal(test_res, eqe.Jint())
+    # pairwise: one spectrum per EQE column -> 1-D
+    np.testing.assert_array_almost_equal(np.array([46.42154037]), eqe.Jint(pairwise=True))
 
     eqe.add_spectra(wvl, np.tile(AM15G.T, [5, 1]).T)
     test_res = np.array([[46.42154037, 46.42154037, 46.42154037, 46.42154037, 46.42154037]])
     np.testing.assert_array_almost_equal(test_res, eqe.Jint())
+    with pytest.raises(ValueError, match="needs one spectrum per EQE column"):
+        eqe.Jint(pairwise=True)
 
     eqe.add_eqe(waves, eq * 0.5)
     test_res = np.vstack([test_res, test_res / 2])
     np.testing.assert_array_almost_equal(test_res, eqe.Jint())
+
+    # deprecated alias still works
+    with pytest.warns(DeprecationWarning):
+        np.testing.assert_array_almost_equal(test_res, eqe.Jint(enforce_all_combinations=True))
+
+
+def test_Jint_no_pairwise_by_coincidence():
+    """2 junctions x 2 spectra must give the 2x2 matrix, not [J_top(spec1), J_bot(spec2)]."""
+    lam = np.linspace(300, 1200, 901)
+    eqe = EQE(lam, np.column_stack([np.where(lam < 700, 0.9, 0.0), np.where(lam >= 700, 0.9, 0.0)]), name="t", sjuncs=["top", "bot"])
+    eqe.add_spectra(lam, np.column_stack([np.ones_like(lam), 0.5 * np.ones_like(lam)]))
+    j = eqe.Jint()
+    assert j.shape == (2, 2)
+    np.testing.assert_allclose(j[:, 1], 0.5 * j[:, 0])
+    # explicit pairing gives the diagonal
+    np.testing.assert_allclose(eqe.Jint(pairwise=True), np.diag(j))
 
 
 def test_ordinal():
