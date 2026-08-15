@@ -7,6 +7,7 @@ This is the PVcircuit Package.
 from __future__ import annotations
 
 import math  # simple math
+import warnings
 from enum import Enum
 from functools import lru_cache
 from typing import Callable, List, Optional, Sequence, Tuple, Union
@@ -657,35 +658,63 @@ class EQE(object):
 
         return Jdb, Egnew
 
-    def Jint(self, enforce_all_combinations: bool = False) -> np.ndarray:
+    def Jint(self, pairwise: bool = False, enforce_all_combinations: Optional[bool] = None) -> np.ndarray:
         """
-        Integrates over spectrum or spectra to calculate the short-circuit current density (Jsc).
+        Integrate EQE(lambda) against the loaded spectra to get short-circuit current densities.
 
-        J = spectra * lambda * EQE(lambda)
-        Jsc = int(Pspec * EQE(lambda) * lambda) in [mA/cm^2]
+        J = int( EQE(lambda) * spectrum(lambda) / E_photon(lambda) ) dlambda   in [mA/cm^2]
 
         Args:
-            enforce_all_combinations (bool): If True, integrates all combinations of EQE and spectra.
-                                             If False, integrates each EQE with its corresponding spectrum.
+            pairwise (bool): Selects how EQE columns and spectra columns are combined.
+
+                * ``False`` (default): every EQE column against every spectrum,
+                  returned as a 2-D matrix of shape ``(n_eqe, n_spectra)`` --
+                  ``J[i, j]`` is EQE column ``i`` under spectrum ``j``. This is what
+                  you want for a multijunction EQE (one column per junction) and any
+                  number of spectra (e.g. AM1.5G + AM1.5D, or a time series).
+                * ``True``: EQE column ``i`` is integrated with spectrum ``i`` only,
+                  returned as a 1-D array of length ``n``. Use this when both axes are
+                  the *same* series (e.g. one temperature-corrected EQE per timestep
+                  paired with that timestep's spectrum). Raises if the number of EQE
+                  columns and spectra differ.
+
+            enforce_all_combinations: Deprecated alias; ``enforce_all_combinations=True``
+                is the same as ``pairwise=False``. Will be removed in a future release.
+
+        Note:
+            For an :class:`EQET` (one EQE column per *temperature*) and a time series
+            of spectra, use :meth:`EQET.get_current_for_temperature` which interpolates
+            J(T) at the cell temperature of each timestep. Looping over the rows of the
+            ``Jint()`` matrix gives J at each *measured* temperature, not at the cell
+            temperature.
 
         Returns:
-            np.ndarray: Integrated current density values.
+            np.ndarray: ``(n_eqe, n_spectra)`` matrix, or ``(n,)`` for ``pairwise=True``.
         """
+
+        if enforce_all_combinations is not None:
+            warnings.warn(
+                "Jint(enforce_all_combinations=...) is deprecated; use pairwise=False (matrix, default) or pairwise=True.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            pairwise = not enforce_all_combinations
 
         if self.spectra is None:
             raise ValueError("Load spectral information first.")
 
-        # Check if we have the same number of EQE curves as spectra
-        if enforce_all_combinations or self.eqe.shape[1] != self.spectra.shape[1]:
-            # Outer product for all combinations
-            integrand = np.einsum("ni,nj->nij", (self.corrEQE / np.asarray(convert.wavelength_to_photonenergy(self.wavelength)) * 1e-1), self.spectra)
-            jsc = trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # Integrate along time axis
-        else:
-            # Pairwise integration: only integrate each EQE with its corresponding spectrum
-            integrand = self.corrEQE * self.spectra / np.asarray(convert.wavelength_to_photonenergy(self.wavelength)) * 1e-1
-            jsc = trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # Integrate along wavelength axis
+        # EQE weighted by 1/E_photon; the 1e-1 factor converts W/m^2/nm / eV -> mA/cm^2/nm
+        weighted_eqe = self.corrEQE / np.asarray(convert.wavelength_to_photonenergy(self.wavelength)) * 1e-1
 
-        return jsc
+        if pairwise:
+            if self.eqe.shape[1] != self.spectra.shape[1]:
+                raise ValueError(f"Jint(pairwise=True) needs one spectrum per EQE column, got {self.eqe.shape[1]} EQE columns and {self.spectra.shape[1]} spectra. Use pairwise=False for the full (n_eqe, n_spectra) matrix.")
+            integrand = weighted_eqe * self.spectra
+            return trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # shape (n,)
+
+        # Outer product: all EQE columns x all spectra
+        integrand = np.einsum("ni,nj->nij", weighted_eqe, self.spectra)
+        return trapezoid(y=integrand, x=self.wavelength.flatten(), axis=0)  # shape (n_eqe, n_spectra)
 
     def plot(
         self,
@@ -1009,7 +1038,7 @@ class EQET(EQE):
             raise ValueError("Spectral and temperature array not the same length.")
 
         # calculate the current density for each spectrum and EQE(T)
-        current_density = self.Jint(enforce_all_combinations=True)
+        current_density = self.Jint()  # (n_temperatures, n_spectra)
 
         if isinstance(degrees, int):
             poly_degree = degrees
@@ -1381,32 +1410,45 @@ class TemperatureModel:
     Temperature model for bandgap and sigma
     """
 
-    def __init__(self, model_type: ModelType, params: List[float], Tref: float = 25):
+    def __init__(self, model_type: ModelType, params: List[float], Tref: float = 25, ref_value: Optional[float] = None):
         """
         Initializes the model with a specified type and parameters.
 
         Args:
             model_type (ModelType): Type of temperature dependence model.
-            params (List[float]): Parameters for the chosen model.
-            Tref (float): Reference temperature.
+            params (List[float]): Parameters for the chosen model, normalised so that
+                ``model(Tref) == 1``.
+            Tref (float): Reference temperature [degC].
+            ref_value (float, optional): Value of the fitted quantity at ``Tref``
+                (e.g. Eg(25 degC) in eV). Set automatically by :meth:`fit`; used as
+                the default scale in :meth:`apply`.
         """
         if model_type not in ModelType:
             raise ValueError(f"Model type '{model_type}' is not supported.")
         self.model_type = model_type
         self.params = params
         self.Tref = Tref
+        self.ref_value = ref_value
 
-    def apply(self, temperature: Union[float, np.ndarray], ref_value: float) -> Union[float, np.ndarray]:
+    def apply(self, temperature: Union[float, np.ndarray], ref_value: Optional[float] = None) -> Union[float, np.ndarray]:
         r"""
         Applies the specified model to temperature and scales it with a reference value.
 
         Args:
-            temperature (Union[float, pd.Series]): Target temperature.
-            ref_value (float): Reference value at a baseline temperature (e.g., 25\degC).
+            temperature (Union[float, pd.Series]): Target temperature [degC].
+            ref_value (float, optional): Value at ``Tref``. Defaults to the value
+                stored at fit time (``self.ref_value``), which is the fitted quantity
+                evaluated at ``Tref`` -- pass it explicitly only if you want to rescale
+                the curve to a different reference (and make sure it is the value at
+                ``Tref``, not at some other temperature).
 
         Returns:
             Union[float, pd.Series]: Calculated value at target temperature.
         """
+        if ref_value is None:
+            ref_value = self.ref_value
+        if ref_value is None:
+            raise ValueError("TemperatureModel.apply: no ref_value given and none stored from fit(); pass ref_value explicitly.")
         model_func = self.model_type.function
         temperature = np.array(temperature)
         return model_func(temperature, *self.params) * ref_value
@@ -1489,5 +1531,5 @@ class TemperatureModel:
         else:
             normalized_params = best_params / ref_value
 
-        temperature_model = cls(best_model_type, normalized_params)
+        temperature_model = cls(best_model_type, normalized_params, Tref=Tref, ref_value=float(ref_value))
         return temperature_model

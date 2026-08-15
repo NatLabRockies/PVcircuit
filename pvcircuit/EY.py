@@ -9,11 +9,17 @@ from typing import List, Optional, Tuple, Union
 
 import numpy as np  # arrays
 import pandas as pd
+from loguru import logger
 from scipy import constants
 from scipy.integrate import trapezoid
 from tqdm import tqdm
 
 import pvcircuit as pvc
+
+# Below this upper wavelength bound the integrated spectra can no longer be
+# regarded as broadband plane-of-array irradiance (AM1.5G carries ~5 % of its
+# power above 2500 nm) -- cell temperature and energy_in would be biased.
+_MIN_BROADBAND_WAVELENGTH_NM = 2500.0
 
 
 def VMloss(model: Union["pvc.Tandem3T", "pvc.Multi2T"], oper: str, ncells: int) -> float:
@@ -106,18 +112,55 @@ def sandia_T(poa_global: Union[float, np.ndarray, pd.Series], wind_speed: Union[
     return temp_cell
 
 
+def _time_weights(datetime: pd.DatetimeIndex) -> np.ndarray:
+    """
+    Per-row integration weights [s] for a (possibly irregular) time axis.
+
+    Row i gets half of the gap to its predecessor plus half of the gap to its
+    successor (end rows: half of their single gap), so that
+    ``sum(y * w) == trapezoid(y, t)`` for the full timeline. Because the
+    weights are stored per row they survive row filtering: dropping rows
+    (night, NaN, APE filters) simply removes their contribution instead of
+    letting the trapezoid rule bridge the gap.
+    """
+    n = len(datetime)
+    if n == 0:
+        return np.zeros(0)
+    if n == 1:
+        return np.zeros(1)
+    seconds = (datetime - datetime[0]).total_seconds().to_numpy(dtype=np.float64)
+    gaps = np.diff(seconds)
+    w = np.empty(n, dtype=np.float64)
+    w[0] = gaps[0] / 2
+    w[-1] = gaps[-1] / 2
+    w[1:-1] = (gaps[:-1] + gaps[1:]) / 2
+    return w
+
+
 def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, TempCell: pd.Series, model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str) -> pd.DataFrame:
     """Evaluate IV parameters for one chunk of timesteps on a single device copy.
 
     The same model instance is reused for every row: each iteration overwrites
     all state that varies between rows (Eg, sigma, Jext, TC), so no state leaks
     from one timestep to the next.
+
+    Rows without photocurrent (all Jsc == 0, e.g. night) or with non-finite
+    Jsc produce zero output (Pmp = Isc = Imp = 0, Voc = Vmp = 0). Multi2T.MPP()
+    returns NaN at zero photocurrent, which would otherwise poison the time
+    integral of the whole year.
     """
 
     columns: list[str] = ["Voc", "Isc", "Vmp", "Imp", "Pmp"]
     IV_params = pd.DataFrame(np.zeros((len(Jscs), len(columns))), columns=columns)
 
     for i in range(len(Jscs)):
+        row_jsc = np.asarray(Jscs[i], dtype=np.float64)
+        # Same threshold as Multi2T.MPP (1e-6 A/cm^2 = 1e-3 mA/cm^2), which
+        # returns NaN below it.
+        if not np.all(np.isfinite(row_jsc)) or np.max(row_jsc) <= 1e-3:
+            # zero output; the DataFrame is pre-filled with zeros
+            continue
+
         if isinstance(model, pvc.Multi2T):  # Multi2T or current matched 2-junction tandem
             for ijunc in range(model.njuncs):
                 # Jscs is stored in mA/cm^2 (Meteo.add_currents); junction.Jext
@@ -150,6 +193,10 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
             else:
                 raise ValueError(f"Unknown 3T operation mode: {oper!r}")
             assert isinstance(iv3T, pvc.iv3T.IV3T)
+            # Load-terminal quantities: VA - VB and min(|IA|, |IB|) equal the
+            # tandem Vmp/Imp (and Voc/Isc below) for CM operation; for MPP/VM they
+            # are the terminal values of the load configuration. Pmp (Ptot) is
+            # the total device output in every mode.
             IV_params.loc[i, "Vmp"] = iv3T.VA - iv3T.VB
             IV_params.loc[i, "Imp"] = min(abs(iv3T.IA), abs(iv3T.IB))
             IV_params.loc[i, "Pmp"] = iv3T.Ptot
@@ -163,41 +210,93 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
         else:
             raise ValueError(f"Unknown model type: {type(model).__name__}")
 
+    # Any remaining non-finite value (e.g. a solver failure on a single row)
+    # must not poison the yield integral.
+    if not np.all(np.isfinite(IV_params.to_numpy())):
+        nbad = int((~np.isfinite(IV_params.to_numpy())).any(axis=1).sum())
+        logger.warning("_calc_yield_async: {} of {} timesteps returned non-finite IV parameters; set to 0", nbad, len(IV_params))
+        IV_params = IV_params.fillna(0.0).replace([np.inf, -np.inf], 0.0)
+
     return IV_params  # Pmax in [W]
 
 
 class Meteo:
     """
+    Handles meteorological environmental data and spectral information for energy yield simulations.
+
     NOTE: All arrays in this class are handled so that each row aligns with a timestamp.
     For instance, any EQE array is assumed to correspond to the same timestamps as this data,
     and each row represents EQE values for that specific time index.
-    Handles meteorological environmental data and spectral information for energy yield simulations.
+
+    Row-aligned attributes: ``datetime``, ``temp``, ``wind``, ``spectra``, ``irradiance``,
+    ``cell_temp``, ``dt`` (integration weight per row [s]), ``average_photon_energy``,
+    ``jscs``, ``bandgaps``, ``sigmas`` and, after :meth:`run_ey`, ``results``.
+
+    Time integration (``energy_in``, energy yield) uses the per-row weights ``dt``
+    (trapezoid weights of the original timeline). They are kept when rows are
+    filtered, so filtered copies integrate only the rows they contain.
+
+    Spectra: NaN entries are replaced by 0 (a partially missing spectrum still
+    contributes its remaining bands to the irradiance). Feed the *filled* spectra
+    (``Meteo.spectra``, ``Meteo.wavelength``) to :meth:`EQE.add_spectra` so that
+    the Jsc time series stays aligned with ``cell_temp`` and does not contain NaN.
     """
 
     def __init__(self, wavelength: np.ndarray, spectra: pd.DataFrame, ambient_temperature: pd.Series, wind: pd.Series, datetime: pd.DatetimeIndex) -> None:
+        wavelength = np.asarray(wavelength, dtype=np.float64).flatten()
+        spectra = pd.DataFrame(spectra)
+        ambient_temperature = pd.Series(np.asarray(ambient_temperature, dtype=np.float64))
+        wind = pd.Series(np.asarray(wind, dtype=np.float64))
+        datetime = pd.DatetimeIndex(datetime)
+
+        nrows = len(datetime)
+        for name, length in (("spectra", spectra.shape[0]), ("ambient_temperature", len(ambient_temperature)), ("wind", len(wind))):
+            if length != nrows:
+                raise ValueError(f"Meteo: {name} has {length} rows but datetime has {nrows} entries; all inputs must be row-aligned")
+        if spectra.shape[1] != len(wavelength):
+            raise ValueError(f"Meteo: spectra has {spectra.shape[1]} columns but wavelength has {len(wavelength)} entries; spectra must be (n_times, n_wavelengths)")
+
         # Replace NaN values in spectra with 0 to ensure data integrity
+        n_nan_rows = int(spectra.isna().any(axis=1).sum())
+        if n_nan_rows > 0:
+            logger.warning(
+                "Meteo: {} of {} spectra rows contain NaN; they are filled with 0 (partial irradiance still counts). Use Meteo.spectra for EQE.add_spectra so Jsc has no NaN.",
+                n_nan_rows,
+                nrows,
+            )
         spectra = spectra.fillna(0)
         # Create a filter to drop any remaining NaNs in ambient_temperature or wind
-        ffilter = (np.all(np.isfinite(spectra), axis=1)) & (np.isfinite(ambient_temperature)) & (np.isfinite(wind))
-        self.temp = ambient_temperature[ffilter]  # Ambient temperature in degrees Celsius
-        self.wind = wind[ffilter]  # Wind speed in meters per second
+        # (positional numpy masks: the pandas indexes of the inputs need not agree)
+        ffilter = np.all(np.isfinite(spectra.to_numpy()), axis=1) & np.isfinite(ambient_temperature.to_numpy()) & np.isfinite(wind.to_numpy())
+        if not ffilter.all():
+            logger.warning("Meteo: dropping {} rows with non-finite temperature/wind", int((~ffilter).sum()))
+        # `spectra` keeps its own row index (whatever the caller used); the
+        # datetime is kept separately in self.datetime.
+        self.temp = pd.Series(ambient_temperature.to_numpy()[ffilter], index=datetime[ffilter])  # Ambient temperature in degrees Celsius
+        self.wind = pd.Series(wind.to_numpy()[ffilter], index=datetime[ffilter])  # Wind speed in meters per second
         self.datetime = datetime[ffilter]  # Filtered datetime index
 
         self.wavelength = wavelength
-        self.spectra = spectra[ffilter]  # Spectral data after filtering
+        self.spectra = spectra.iloc[ffilter]  # Spectral data after filtering
+
+        if wavelength.max() < _MIN_BROADBAND_WAVELENGTH_NM:
+            logger.warning(
+                "Meteo: spectra only extend to {:.0f} nm. Irradiance (cell temperature) and energy_in are integrated over the given range only; pass broadband spectra (~280-4000 nm) for a correct energy harvesting efficiency.",
+                wavelength.max(),
+            )
 
         # Calculate irradiance from spectral proxy data
-        self.irradiance = pd.Series(trapezoid(y=self.spectra, x=self.wavelength), index=self.datetime)  # Optical power of each spectrum
+        self.irradiance = pd.Series(trapezoid(y=self.spectra.to_numpy(), x=self.wavelength), index=self.datetime)  # Optical power of each spectrum [W/m^2]
         self.cell_temp: pd.Series = pd.Series(
             sandia_T(self.irradiance.to_numpy(), self.wind.to_numpy(), self.temp.to_numpy()),
             index=self.datetime,
         )  # Cell temperature calculation
-        # Convert datetimes to float seconds since the first sample.
-        # `(datetime - datetime[0]).total_seconds()` is pandas-native and
-        # resolution-agnostic, so it works under both pandas 2.x ([ns])
-        # and pandas 3.x ([us]).  Using `astype(np.int64)/1e9` would be
-        # silently 1000x off under pandas >= 3.0.
-        self.energy_in = trapezoid(y=self.irradiance, x=(self.datetime - self.datetime[0]).total_seconds()) / 3600 / 1000  # Energy input [kWh/m^2/yr]
+        # Per-row integration weights [s] (see _time_weights). Uses
+        # `(datetime - datetime[0]).total_seconds()`, which is pandas-native and
+        # resolution-agnostic (pandas 2.x [ns] and 3.x [us]).
+        self.dt: pd.Series = pd.Series(_time_weights(self.datetime), index=self.datetime)
+        self.energy_in = 0.0
+        self._recompute_energy_in()  # Energy input [kWh/m^2/yr]
 
         self.average_photon_energy = None  # Will be calculated when running calc_ape
         self.jscs = None  # Short-circuit currents
@@ -212,6 +311,7 @@ class Meteo:
             array (np.ndarray): Array to add.
             attribute_name (str): Name of the attribute to which the array will be added.
         """
+        array = np.asarray(array, dtype=np.float64)
         # Ensure the array is columnar and matches the number of rows in cell_temp
         if array.ndim == 1:
             array = array[:, np.newaxis]
@@ -221,6 +321,14 @@ class Meteo:
         if array.shape[0] != self.cell_temp.shape[0]:
             raise ValueError(f"Shape of data {array.shape} does not match cell_temp rows {self.cell_temp.shape[0]}")
 
+        if not np.all(np.isfinite(array)):
+            logger.warning(
+                "Meteo.{}: {} of {} rows contain non-finite values; those timesteps will yield zero output in run_ey",
+                "add_" + {"jscs": "currents", "bandgaps": "bandgaps", "sigmas": "sigmas"}.get(attribute_name, attribute_name),
+                int((~np.isfinite(array)).any(axis=1).sum()),
+                array.shape[0],
+            )
+
         current_attr = getattr(self, attribute_name)
         if current_attr is None:
             setattr(self, attribute_name, array)
@@ -229,7 +337,7 @@ class Meteo:
 
     def add_currents(self, jsc: np.ndarray) -> None:
         """
-        Add Jsc array to the instance.
+        Add Jsc array to the instance, one call (or one column) per junction.
 
         Jsc values are stored in self.jscs in **mA/cm^2** (the native unit
         of JintMD).  They are converted to A/cm^2 inside
@@ -237,27 +345,39 @@ class Meteo:
         Junction.Jext.
 
         Args:
-            jsc (np.ndarray): Short-circuit current values to add [mA/cm^2].
+            jsc (np.ndarray): Short-circuit current values to add [mA/cm^2], one
+                value per timestep (shape ``(n_times,)``, ``(n_times, 1)`` or
+                ``(1, n_times)``). For temperature-dependent EQE use
+                ``EQET.get_current_for_temperature(cell_temp)``; do not loop over
+                the rows of ``EQET.Jint()`` (those are the *measured* temperatures).
         """
         self._add_array(jsc, "jscs")
 
     def add_bandgaps(self, bandgap: np.ndarray) -> None:
         """
-        Add bandgap array to the instance.
+        Add bandgap array to the instance, one call (or one column) per junction.
 
         Args:
-            bandgap (np.ndarray): Bandgap energy values to add.
+            bandgap (np.ndarray): Bandgap energy values to add [eV], one per timestep.
         """
         self._add_array(bandgap, "bandgaps")
 
     def add_sigmas(self, sigma: np.ndarray) -> None:
         """
-        Add sigma array for bandgap tail states to the instance.
+        Add sigma array for bandgap tail states to the instance, one call (or one column) per junction.
 
         Args:
-            sigma (np.ndarray): Sigma values to add.
+            sigma (np.ndarray): Sigma values to add [eV], one per timestep.
         """
         self._add_array(sigma, "sigmas")
+
+    @staticmethod
+    def _model_njuncs(model: Union["pvc.Multi2T", "pvc.Tandem3T"]) -> int:
+        if isinstance(model, pvc.Multi2T):
+            return int(model.njuncs)
+        if isinstance(model, pvc.Tandem3T):
+            return 2
+        raise ValueError(f"Unknown model type: {type(model).__name__}")
 
     def run_ey(self, model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str, multiprocessing: bool = True) -> Tuple[float, float]:
         """
@@ -269,11 +389,16 @@ class Meteo:
             multiprocessing (bool, optional): Whether to use multiprocessing. Defaults to True.
 
         Raises:
-            ValueError: If data array sizes are inconsistent with cell temperature.
+            ValueError: If data array sizes are inconsistent with cell temperature, or if
+                the number of Jsc/bandgap/sigma columns does not match the number of
+                junctions of ``model``.
 
         Returns:
             Tuple[float, float]: A tuple containing energy yield [kWh/m^2/yr] and energy harvesting efficiency.
         """
+        if self.jscs is None or self.bandgaps is None:
+            raise ValueError("run_ey: add_currents() and add_bandgaps() must be called before run_ey()")
+
         # If sigma values are not provided, initialize them to zero
         if self.sigmas is None:
             self.sigmas = np.zeros_like(self.bandgaps)
@@ -283,9 +408,15 @@ class Meteo:
         assert self.sigmas is not None
 
         # Ensure all data arrays have consistent shapes
-        for attr in [self.jscs, self.bandgaps, self.sigmas]:
+        njuncs = self._model_njuncs(model)
+        for name, attr in (("jscs", self.jscs), ("bandgaps", self.bandgaps), ("sigmas", self.sigmas)):
             if attr.shape[0] != self.cell_temp.shape[0]:
-                raise ValueError(f"Inconsistent array size: {attr.shape[0]} rows, expected {self.cell_temp.shape[0]}")
+                raise ValueError(f"Inconsistent array size: {name} has {attr.shape[0]} rows, expected {self.cell_temp.shape[0]}")
+            if attr.shape[1] != njuncs:
+                raise ValueError(f"run_ey: {name} has {attr.shape[1]} columns but {model.name!r} ({type(model).__name__}) has {njuncs} junctions; call add_{'currents' if name == 'jscs' else name}() exactly once per junction")
+
+        if not np.all(np.isfinite(self.jscs)):
+            logger.warning("run_ey: {} timesteps have non-finite Jsc and will yield zero output", int((~np.isfinite(self.jscs)).any(axis=1).sum()))
 
         # Determine chunk sizes for multiprocessing
         max_chunk_size = 200
@@ -337,7 +468,7 @@ class Meteo:
         self.results = results
         self.results.index = self.datetime
 
-        power = results["Pmp"]  # output power [W]
+        power = results["Pmp"].to_numpy()  # output power [W]
 
         # Normalise by device.totalarea (= max junction totalarea). This is
         # the project-wide reference area for power normalisation: it matches
@@ -346,7 +477,9 @@ class Meteo:
         # device footprint a system installer would see.
         power_density = power / model.totalarea  # W --> W/cm^2
 
-        EnergyOut = trapezoid(power_density, (self.datetime - self.datetime[0]).total_seconds())  # [Ws/cm^2/yr]
+        # Weighted sum with the per-row time weights (== trapezoid on the
+        # unfiltered timeline; robust against filtered/irregular rows).
+        EnergyOut = float(np.sum(power_density * self.dt.to_numpy()))  # [Ws/cm^2/yr]
 
         # Unit conversion breakdown for the factor /3.6e3 /1e3 *1e4:
         #   /3600  : seconds -> hours      (Ws -> Wh)
@@ -355,7 +488,7 @@ class Meteo:
         EnergyOut = EnergyOut / 3.6e3 / 1e3 * 1e4  # [Ws/cm^2/yr] --> [kWh/m^2/yr]
 
         # Calculate energy harvesting efficiency
-        EYeff = EnergyOut / self.energy_in
+        EYeff = EnergyOut / self.energy_in if self.energy_in > 0 else np.nan
         return EnergyOut, EYeff
 
     def calc_ape(self) -> None:
@@ -371,18 +504,22 @@ class Meteo:
         self.average_photon_energy = trapezoid(x=self.wavelength, y=self.spectra.values) / constants.e / trapezoid(x=self.wavelength, y=phi.values)
 
     def _recompute_energy_in(self) -> None:
-        """Recompute the integrated energy input from the current (filtered) rows."""
+        """Recompute the integrated energy input [kWh/m^2/yr] from the current rows and their time weights."""
         if len(self.datetime) == 0:
             self.energy_in = 0.0
             return
-        self.energy_in = trapezoid(y=self.irradiance, x=(self.datetime - self.datetime[0]).total_seconds()) / 3600 / 1000  # [kWh/m^2/yr]
+        self.energy_in = float(np.nansum(self.irradiance.to_numpy() * self.dt.to_numpy())) / 3600 / 1000  # [Ws/m^2] -> [kWh/m^2/yr]
 
     def _apply_row_mask(self, mask: np.ndarray) -> "Meteo":
         """
         Return a deep copy with a boolean row mask applied to every
-        row-aligned attribute (meteorological series and any added
-        jsc/bandgap/sigma arrays), and energy_in recomputed.
+        row-aligned attribute (meteorological series, time weights, any added
+        jsc/bandgap/sigma arrays and results), and energy_in recomputed.
         """
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != (len(self.datetime),):
+            raise ValueError(f"row mask has shape {mask.shape}, expected ({len(self.datetime)},)")
+
         self_copy = copy.deepcopy(self)
 
         self_copy.datetime = self_copy.datetime[mask]
@@ -391,12 +528,15 @@ class Meteo:
         self_copy.spectra = self_copy.spectra[mask]
         self_copy.irradiance = self_copy.irradiance[mask]
         self_copy.cell_temp = self_copy.cell_temp[mask]
+        self_copy.dt = self_copy.dt[mask]
         if self_copy.average_photon_energy is not None:
             self_copy.average_photon_energy = self_copy.average_photon_energy[mask]
         for attr_name in ("jscs", "bandgaps", "sigmas"):
             attr = getattr(self_copy, attr_name)
             if attr is not None:
                 setattr(self_copy, attr_name, attr[mask])
+        if getattr(self_copy, "results", None) is not None:
+            self_copy.results = self_copy.results[mask]
 
         # energy_in was integrated over the unfiltered rows; recompute so
         # run_ey efficiency on the filtered copy is normalised correctly.
@@ -438,29 +578,24 @@ class Meteo:
 
     def filter_custom(self, filter_array: np.ndarray) -> "Meteo":
         """
-        Apply a custom filter to the meteorological data.
+        Apply a custom boolean row filter to the meteorological data.
 
         Args:
-            filter_array (np.ndarray): Boolean array used to filter the data.
+            filter_array (np.ndarray): Boolean array with one entry per timestep.
 
         Returns:
             Meteo: A new Meteo instance with custom-filtered data.
         """
-        self_copy = copy.deepcopy(self)
-
-        # Apply the filter to all row-aligned attributes
-        for attr_name in vars(self):
-            if hasattr(getattr(self_copy, attr_name), "__len__"):
-                attr = getattr(self_copy, attr_name)
-                if len(attr) == len(filter_array):
-                    setattr(self_copy, attr_name, attr[filter_array])
-
-        self_copy._recompute_energy_in()
-        return self_copy
+        return self._apply_row_mask(np.asarray(filter_array, dtype=bool))
 
     def reindex(self, index: pd.Index, method: str = "nearest", tolerance: Optional[pd.Timedelta] = None) -> "Meteo":
         """
         Reindex the data according to the provided time indexer.
+
+        All row-aligned attributes (pandas series/frames *and* the numpy
+        jsc/bandgap/sigma/APE arrays) are aligned to ``index``; rows without a
+        match within ``tolerance`` become NaN. Time weights ``dt`` and
+        ``energy_in`` are recomputed for the new index.
 
         Args:
             index (pd.Index): New index to reindex the data to.
@@ -475,12 +610,29 @@ class Meteo:
             # this literal call cannot produce NaT.
             tolerance = pd.Timedelta(seconds=30)  # ty: ignore[invalid-assignment]
 
+        index = pd.DatetimeIndex(index)
         self_copy = copy.deepcopy(self)
 
         # Reindex all pandas DataFrame or Series attributes
-        for attr_name in dir(self):
+        for attr_name in vars(self):
             attr = getattr(self, attr_name)
             if (isinstance(attr, pd.DataFrame) or isinstance(attr, pd.Series)) and isinstance(attr.index, pd.DatetimeIndex):
                 setattr(self_copy, attr_name, attr.reindex(index=index, method=method, tolerance=tolerance))
+        # spectra keeps whatever row index the caller used; align it positionally
+        if not isinstance(self.spectra.index, pd.DatetimeIndex):
+            spectra_dt = self.spectra.set_index(self.datetime)
+            self_copy.spectra = spectra_dt.reindex(index=index, method=method, tolerance=tolerance)
+
+        # numpy row-aligned arrays: positional indexer, unmatched rows -> NaN
+        indexer = self.datetime.get_indexer(index, method=method, tolerance=tolerance)
+        for attr_name in ("jscs", "bandgaps", "sigmas", "average_photon_energy"):
+            attr = getattr(self, attr_name)
+            if attr is not None:
+                new = np.asarray(attr, dtype=np.float64)[indexer]
+                new[indexer < 0] = np.nan
+                setattr(self_copy, attr_name, new)
+
         self_copy.datetime = index
+        self_copy.dt = pd.Series(_time_weights(index), index=index)
+        self_copy._recompute_energy_in()
         return self_copy

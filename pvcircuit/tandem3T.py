@@ -54,6 +54,16 @@ def _solve_scaled_newton_system(jacobian, residual):
     return delta
 
 
+def _is_per_junction_list(value) -> bool:
+    """True if value is a length-2 sequence whose elements are themselves sequences (one per junction)."""
+    if np.isscalar(value) or isinstance(value, np.ndarray) and value.ndim < 2:
+        return False
+    try:
+        return len(value) == 2 and all(not np.isscalar(v) and hasattr(v, "__len__") for v in value)
+    except TypeError:
+        return False
+
+
 class Tandem3T:
     """
     Tandem3T class for optoelectronic model
@@ -142,7 +152,22 @@ class Tandem3T:
     #                 cntrl.click()  # click button
 
     def set(self, **kwargs):
-        # controlled update of Tandem3T attributes
+        """
+        Controlled update of Tandem3T attributes.
+
+        Junction attributes are forwarded to ``self.top`` and ``self.bot``:
+
+        * Scalar junction attributes (``Eg``, ``TC``, ``Rser``, ``Gsh``, ``Jext`` ...):
+          a scalar is applied to **both** junctions (so ``set(Rser=1)`` gives a device
+          series resistance of 2 Ohm cm^2); a length-2 sequence is split per junction,
+          ``set(Rser=[R_top, R_bot])``.
+        * Diode arrays (``n``, ``J0ratio``): a flat sequence is the diode list of
+          **each** junction (``set(n=[1.5, 1.0])`` gives every junction a two-diode
+          model); a length-2 sequence of sequences is split per junction,
+          ``set(n=[[1.5], [1.0]])`` -> ``top.n = [1.5]``, ``bot.n = [1.0]``.
+
+        Use ``self.top.set(...)`` / ``self.bot.set(...)`` when in doubt.
+        """
 
         # with self.debugout:
         #     print("Tset: ", list(kwargs.keys()))
@@ -156,6 +181,9 @@ class Tandem3T:
                 for key, value in jkwargs.items():
                     if key in Junction.ATTR and not np.isscalar(value):
                         # dimension mismatch possibly from self.proplist()
+                        jikwargs[key] = value[i]
+                    elif key in Junction.ARY_ATTR and _is_per_junction_list(value):
+                        # nested list: one diode array per junction
                         jikwargs[key] = value[i]
                     else:
                         jikwargs[key] = value
