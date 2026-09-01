@@ -1,14 +1,16 @@
+from typing import cast
+
 import matplotlib
+
 matplotlib.use('Agg')  # Add this line at the top, before importing pyplot
 import matplotlib.pyplot as plt
-
 import numpy as np
 import pandas as pd
 import pytest
 
 import pvcircuit as pvc
 from pvcircuit import EQE
-from pvcircuit.qe import wvl, AM15G
+from pvcircuit.qe import AM15G, wvl
 
 
 def get_measured_eqe():
@@ -58,8 +60,11 @@ def test_Jint():
     # Jint() always returns the (n_eqe, n_spectra) matrix
     test_res = np.array([[46.42154037]])
     np.testing.assert_array_almost_equal(test_res, eqe.Jint())
+    np.testing.assert_array_almost_equal(test_res, eqe.Jint(pairwise=False))
     # pairwise: one spectrum per EQE column -> 1-D
     np.testing.assert_array_almost_equal(np.array([46.42154037]), eqe.Jint(pairwise=True))
+    with pytest.raises(TypeError, match="must be True or False"):
+        eqe.Jint(pairwise=cast(bool, None))
 
     eqe.add_spectra(wvl, np.tile(AM15G.T, [5, 1]).T)
     test_res = np.array([[46.42154037, 46.42154037, 46.42154037, 46.42154037, 46.42154037]])
@@ -74,6 +79,11 @@ def test_Jint():
     # deprecated alias still works
     with pytest.warns(DeprecationWarning):
         np.testing.assert_array_almost_equal(test_res, eqe.Jint(enforce_all_combinations=True))
+    # legacy positional True also meant all combinations
+    with pytest.warns(DeprecationWarning):
+        np.testing.assert_array_almost_equal(test_res, eqe.Jint(True))
+    with pytest.raises(TypeError, match="cannot combine"):
+        eqe.Jint(True, pairwise=True)
 
 
 def test_Jint_no_pairwise_by_coincidence():
@@ -86,6 +96,9 @@ def test_Jint_no_pairwise_by_coincidence():
     np.testing.assert_allclose(j[:, 1], 0.5 * j[:, 0])
     # explicit pairing gives the diagonal
     np.testing.assert_allclose(eqe.Jint(pairwise=True), np.diag(j))
+    # legacy positional False paired columns when their counts matched
+    with pytest.warns(DeprecationWarning):
+        np.testing.assert_allclose(eqe.Jint(False), np.diag(j))
 
 
 def test_ordinal():

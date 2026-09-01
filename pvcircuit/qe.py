@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 This is the PVcircuit Package.
     pvcircuit.qe    # functions for QE analysis
@@ -8,9 +7,10 @@ from __future__ import annotations
 
 import math  # simple math
 import warnings
+from collections.abc import Callable, Sequence
 from enum import Enum
 from functools import lru_cache
-from typing import Callable, List, Optional, Sequence, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import matplotlib as mpl  # plotting
 import matplotlib.pyplot as plt  # plotting
@@ -90,7 +90,7 @@ def _gaussian(x: np.ndarray, a: float, x0: float, sigma: float) -> np.ndarray:
     return a * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
 
 
-def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[float]], TC: float, Eguess: float = 1.0, kTfilter: int = 3, bplot: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+def JdbMD(EQE: np.ndarray | list[float], xEQE: np.ndarray | list[float], TC: float, Eguess: float = 1.0, kTfilter: int = 3, bplot: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """
     calculate detailed-balance reverse saturation current
     from EQE vs xEQE
@@ -159,12 +159,12 @@ def JdbMD(EQE: Union[np.ndarray, List[float]], xEQE: Union[np.ndarray, List[floa
     return Jdb, Egnew
 
 
-def PintMD(Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> np.ndarray:
+def PintMD(Pspec: str | np.ndarray, xspec: np.ndarray = wvl) -> np.ndarray:
     # optical power of spectrum over full range
     return JintMD(None, None, Pspec, xspec)
 
 
-def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], None], Pspec: Union[str, np.ndarray], xspec: np.ndarray = wvl) -> np.ndarray:
+def JintMD(EQE: np.ndarray | None, xEQE: np.ndarray | list[float] | None, Pspec: str | np.ndarray, xspec: np.ndarray = wvl) -> np.ndarray:
     """
     integrate over spectrum or spectra
     if EQE is None -> calculate Power in [W/m2]
@@ -279,7 +279,7 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
             EQEfine = np.expand_dims((EQEinterp(xrange) * xrange), axis=1) * JCONST  # lambda*EQE(lambda)[lambda,1]
         else:
             EQEfine = EQEinterp(xrange) * xrange[:, np.newaxis] * JCONST  # lambda*EQE(lambda)[lambda,junc]
-        for ijunc in range(0, njuncs):
+        for ijunc in range(njuncs):
             if nspecs == 1:
                 Jintegral[:, 0, ijunc] = Pspec.copy()[n0 : n1 + 1]  # for Ptot
             else:
@@ -293,7 +293,7 @@ def JintMD(EQE: Union[np.ndarray, None], xEQE: Union[np.ndarray, List[float], No
 
 
 @lru_cache(maxsize=100)
-def JdbFromEg(TC: float, Eg: float, dbsides: float = 1.0, method: Union[str, None] = None) -> float:
+def JdbFromEg(TC: float, Eg: float, dbsides: float = 1.0, method: str | None = None) -> float:
     """
     return the detailed balance dark current
     assuming a square EQE
@@ -322,7 +322,7 @@ def JdbFromEg(TC: float, Eg: float, dbsides: float = 1.0, method: Union[str, Non
 
 
 @lru_cache(maxsize=100)
-def EgFromJdb(TC: float, Jdb: float, Eg: float = 1.0, eps: float = 1e-6, itermax: int = 100, dbsides: float = 1.0) -> Union[float, None]:
+def EgFromJdb(TC: float, Jdb: float, Eg: float = 1.0, eps: float = 1e-6, itermax: int = 100, dbsides: float = 1.0) -> float | None:
     """
     see GetData AT_Egcalc
     return the bandgap from the Jdb
@@ -356,7 +356,7 @@ def EgFromJdb(TC: float, Jdb: float, Eg: float = 1.0, eps: float = 1e-6, itermax
     return None
 
 
-def ensure_numpy_2drow(array: Union[np.ndarray, pd.Index, pd.DataFrame, Sequence[Union[int, float]]]) -> np.ndarray:
+def ensure_numpy_2drow(array: np.ndarray | pd.Index | pd.DataFrame | Sequence[int | float]) -> np.ndarray:
 
     # ensure numpy
     array = np.array(array)
@@ -365,7 +365,7 @@ def ensure_numpy_2drow(array: Union[np.ndarray, pd.Index, pd.DataFrame, Sequence
     return array
 
 
-def ensure_numpy_2dcol(array: Union[np.ndarray, pd.Index, pd.DataFrame, Sequence[Union[int, float]]]) -> np.ndarray:
+def ensure_numpy_2dcol(array: np.ndarray | pd.Index | pd.DataFrame | Sequence[int | float]) -> np.ndarray:
 
     # ensure numpy
     array = np.array(array)
@@ -374,7 +374,7 @@ def ensure_numpy_2dcol(array: Union[np.ndarray, pd.Index, pd.DataFrame, Sequence
     return array
 
 
-class EQE(object):
+class EQE:
     """
     EQE object
     It creates a class containing nth junctions EQEs and Luminescent Coupling
@@ -392,7 +392,7 @@ class EQE(object):
 
     """
 
-    def __init__(self, wavelength: Union[np.ndarray, pd.Index], eqe: Union[np.ndarray, pd.DataFrame], name: str = "EQE", sjuncs: Union[List[str], None] = None):
+    def __init__(self, wavelength: np.ndarray | pd.Index, eqe: np.ndarray | pd.DataFrame, name: str = "EQE", sjuncs: list[str] | None = None):
         """It creats the EQE class. ntegrate over spectrum or spectra
         rawEQE (numpy.array):  2D(lambda)(junction) raw input rawEQE (not LC corrected)
         xEQE(numpy.array)      xEQE        # wavelengths [nm] for rawEQE data
@@ -423,7 +423,7 @@ class EQE(object):
         self.LCcorr()  # calculate LC with zero etas
         self.spectra = None
 
-    def add_spectra(self, wavelength: Union[np.ndarray, None] = None, spectra: Union[np.ndarray, None] = None) -> None:
+    def add_spectra(self, wavelength: np.ndarray | None = None, spectra: np.ndarray | None = None) -> None:
         """
         Add spectral data
 
@@ -450,7 +450,7 @@ class EQE(object):
         spectra_interp = f_spec_interp(self.wavelength.flatten())
         self.spectra = spectra_interp
 
-    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, sjuncs: Union[str, None] = None) -> None:
+    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, sjuncs: str | None = None) -> None:
         """
         Add eqe. Merge wavelength, inpolate eqe and fill extrapolation with 0. Assumes that the all EQE are part of a multijunction device.
 
@@ -488,7 +488,7 @@ class EQE(object):
         self.etas = np.zeros((self.njuncs, 3), dtype=np.float64)  # LC factor for next junctions
         self.LCcorr()  # calculate LC with zero etas
 
-    def calc_Eg_Rau(self, return_sigma: bool = True, fit_gaussian: bool = True, plot_fits: bool = False) -> Tuple[List[float], List[Optional[float]]]:
+    def calc_Eg_Rau(self, return_sigma: bool = True, fit_gaussian: bool = True, plot_fits: bool = False) -> tuple[list[float], list[float | None]]:
         # using U. Rau, B. Blank, T. C. M. Mueller, and T. Kirchartz
         # 'Efficiency Potential of Photovoltaic Materials and Devices Unveiled by Detailed-Balance Analysis',
         # Phys. Rev. Applied, vol. 7, no. 4, p. 044016, Apr. 2017, doi: 10.1103/PhysRevApplied.7.044016.
@@ -591,7 +591,7 @@ class EQE(object):
             sigmas.append(sigma)
         return bandgaps, sigmas
 
-    def LCcorr(self, junc: Union[int, None] = None, dist: Union[int, None] = None, val: Union[float, None] = None) -> None:
+    def LCcorr(self, junc: int | None = None, dist: int | None = None, val: float | None = None) -> None:
         """
         Applies the correction of the Luminescent coupling to the QE junc using procedure
         from Steiner et al., IEEE PV, v3, p879 (2013)
@@ -628,7 +628,7 @@ class EQE(object):
                         - raw[:, ijunc - 3] * etas[ijunc, 0] * etas[ijunc, 1] * etas[ijunc, 2]
                     )
 
-    def Jdb(self, TC: float, Eguess: float = 1.0, kTfilter: int = 3, dbug: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    def Jdb(self, TC: float, Eguess: float = 1.0, kTfilter: int = 3, dbug: bool = False) -> tuple[np.ndarray, np.ndarray]:
         """It calculate Jscs and Egs from self.corrEQE"""
         Vthlocal = convert.Vth(TC)  # kT
         Eguess_arr = np.array([Eguess] * self.njuncs)
@@ -658,50 +658,102 @@ class EQE(object):
 
         return Jdb, Egnew
 
-    def Jint(self, pairwise: bool = False, enforce_all_combinations: Optional[bool] = None) -> np.ndarray:
+    def Jint(
+        self,
+        enforce_all_combinations: bool | None = None,
+        *,
+        pairwise: bool = False,
+    ) -> np.ndarray:
         """
-        Integrate EQE(lambda) against the loaded spectra to get short-circuit current densities.
+        Integrate corrected EQE columns against the loaded spectra.
 
-        J = int( EQE(lambda) * spectrum(lambda) / E_photon(lambda) ) dlambda   in [mA/cm^2]
+        For corrected EQE column ``Q_i(lambda)`` and spectral-irradiance
+        column ``S_j(lambda)``, the current density is
+
+            J_ij = 0.1 * int Q_i(lambda) * S_j(lambda) / E_ph(lambda) d lambda
+
+        Here ``S_j`` is in W/m^2/nm, ``E_ph`` is the photon energy in eV, and
+        ``J_ij`` is in mA/cm^2. The factor 0.1 converts A/m^2 to mA/cm^2 after
+        the electron charge cancels in the photon-flux-to-current conversion.
+
+        Default mode (``pairwise=False``): default, every EQE column against every spectrum
+        ----------------------------------------------------
+        ``Jint()`` and ``Jint(pairwise=False)`` integrate every EQE column
+        with every spectrum column.
+        The result is always a 2-D array with shape
+        ``(n_eqe, n_spectra)``:
+
+            EQE columns   Spectra   Output shape   Meaning
+            1             1         (1, 1)         one junction, one spectrum
+            1             m         (1, m)         one junction, every spectrum
+            n             1         (n, 1)         every junction, one spectrum
+            n             m         (n, m)         every junction, every spectrum
+
+        Singleton dimensions are retained. For two junctions and two spectra,
+        for example:
+
+            Jint() = [[J_top_s0, J_top_s1],
+                      [J_bot_s0, J_bot_s1]]     # shape (2, 2)
+
+        Pairwise mode (``pairwise=True``): only matching EQE/spectrum columns
+        --------------------------------------------------------
+        ``Jint(pairwise=True)`` requires the same number of EQE and spectrum
+        columns. It integrates EQE column ``i`` only with spectrum column
+        ``i`` and returns a 1-D array:
+
+            Jint(pairwise=True) = [J_00, J_11, J_22]  # 3 matched pairs
+
+        This is equivalent to taking the diagonal of the default result; all
+        off-diagonal combinations are omitted. For the two-junction example
+        above, pairwise mode returns ``[J_top_s0, J_bot_s1]``. It does not
+        evaluate both junctions under both spectra and it does not sum their
+        currents.
+
+        Use pairwise mode only when EQE column ``i`` and spectrum column ``i``
+        intentionally represent the same observation, such as one
+        temperature-adjusted EQE paired with each time-step spectrum. For an
+        ordinary multijunction EQE evaluated under one or more spectra, use
+        the default mode.
 
         Args:
-            pairwise (bool): Selects how EQE columns and spectra columns are combined.
-
-                * ``False`` (default): every EQE column against every spectrum,
-                  returned as a 2-D matrix of shape ``(n_eqe, n_spectra)`` --
-                  ``J[i, j]`` is EQE column ``i`` under spectrum ``j``. This is what
-                  you want for a multijunction EQE (one column per junction) and any
-                  number of spectra (e.g. AM1.5G + AM1.5D, or a time series).
-                * ``True``: EQE column ``i`` is integrated with spectrum ``i`` only,
-                  returned as a 1-D array of length ``n``. Use this when both axes are
-                  the *same* series (e.g. one temperature-corrected EQE per timestep
-                  paired with that timestep's spectrum). Raises if the number of EQE
-                  columns and spectra differ.
-
-            enforce_all_combinations: Deprecated alias; ``enforce_all_combinations=True``
-                is the same as ``pairwise=False``. Will be removed in a future release.
+            enforce_all_combinations: Deprecated compatibility argument. ``True``
+                selects every combination. ``False`` selects the historical
+                behavior: pair matching columns when their counts are equal,
+                otherwise use every combination. New code should use ``pairwise``.
+                Its default ``None`` only means that this deprecated argument
+                was not supplied; it is not a third calculation mode.
+            pairwise: ``False`` returns every combination as a 2-D matrix.
+                ``True`` returns only matching column pairs as a 1-D array.
+                Pairwise mode raises ``ValueError`` when the EQE and spectrum
+                column counts differ. ``None`` is not accepted.
 
         Note:
-            For an :class:`EQET` (one EQE column per *temperature*) and a time series
-            of spectra, use :meth:`EQET.get_current_for_temperature` which interpolates
-            J(T) at the cell temperature of each timestep. Looping over the rows of the
-            ``Jint()`` matrix gives J at each *measured* temperature, not at the cell
-            temperature.
+            For an :class:`EQET`, rows of the default matrix correspond to
+            measured EQE temperatures rather than junctions. Use
+            :meth:`EQET.get_current_for_temperature` to interpolate current at
+            each time step's cell temperature.
 
         Returns:
-            np.ndarray: ``(n_eqe, n_spectra)`` matrix, or ``(n,)`` for ``pairwise=True``.
+            The ``(n_eqe, n_spectra)`` current-density matrix, or the ``(n,)``
+            vector of matching pairs when ``pairwise=True``.
         """
-
-        if enforce_all_combinations is not None:
-            warnings.warn(
-                "Jint(enforce_all_combinations=...) is deprecated; use pairwise=False (matrix, default) or pairwise=True.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            pairwise = not enforce_all_combinations
 
         if self.spectra is None:
             raise ValueError("Load spectral information first.")
+
+        if not isinstance(pairwise, bool):
+            raise TypeError("Jint() pairwise must be True or False")
+
+        if enforce_all_combinations is not None and pairwise:
+            raise TypeError("Jint() cannot combine the deprecated positional argument with pairwise=True")
+
+        if enforce_all_combinations is not None:
+            warnings.warn(
+                "Jint(enforce_all_combinations=...) and positional booleans are deprecated; use pairwise=False (matrix, default) or pairwise=True.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            pairwise = not enforce_all_combinations and self.eqe.shape[1] == self.spectra.shape[1]
 
         # EQE weighted by 1/E_photon; the 1e-1 factor converts W/m^2/nm / eV -> mA/cm^2/nm
         weighted_eqe = self.corrEQE / np.asarray(convert.wavelength_to_photonenergy(self.wavelength)) * 1e-1
@@ -718,14 +770,14 @@ class EQE(object):
 
     def plot(
         self,
-        Pspec: Union[str, np.ndarray] = "global",
+        Pspec: str | np.ndarray = "global",
         ispec: int = 0,
-        specname: Union[str, None] = None,
+        specname: str | None = None,
         xspec: np.ndarray = wvl,
         size: str = "x-large",
-        fig: Union[plt.Figure, None] = None,
-        ax: Union[plt.Axes, None] = None,
-    ) -> Tuple[plt.Axes, plt.Axes]:
+        fig: plt.Figure | None = None,
+        ax: plt.Axes | None = None,
+    ) -> tuple[plt.Axes, plt.Axes]:
         # plot EQE on top of a spectrum
         rnd2 = 100
 
@@ -769,7 +821,7 @@ class EQE(object):
             # rax.legend(loc=7)
         return ax, rax
 
-    def plot_sr(self) -> Tuple[plt.Figure, plt.Axes]:
+    def plot_sr(self) -> tuple[plt.Figure, plt.Axes]:
         # plot EQE on top of a spectrum
 
         sr = self.eqe * 1 / np.asarray(convert.wavelength_to_photonenergy(self.wavelength))
@@ -780,7 +832,7 @@ class EQE(object):
 
 class EQET(EQE):
 
-    def __init__(self, wavelength: Union[np.ndarray, pd.Index], eqe: Union[np.ndarray, pd.DataFrame], temperature: np.ndarray, name: str = "EQE", sjuncs: Union[List[str], None] = None):
+    def __init__(self, wavelength: np.ndarray | pd.Index, eqe: np.ndarray | pd.DataFrame, temperature: np.ndarray, name: str = "EQE", sjuncs: list[str] | None = None):
 
         # ensure numpy
         temperature = np.atleast_1d(temperature) if not isinstance(temperature, np.ndarray) else temperature
@@ -809,7 +861,7 @@ class EQET(EQE):
         self.eqe = self.eqe[:, temperature_sorter]
         self.corrEQE = self.corrEQE[:, temperature_sorter]
 
-    def _qe_from_model(self, temperature: np.ndarray) -> "EQET":
+    def _qe_from_model(self, temperature: np.ndarray) -> EQET:
         raise NotImplementedError("EQET method 'model' is not implemented yet; use method='interpolate'")
 
     # def controls(self, Pspec='global', ispec=0, specname=None, xspec=wvl):
@@ -1014,7 +1066,7 @@ class EQET(EQE):
             raise ValueError(f"Method '{method}' is not implemented. Available methods: {list(self.method_dict.keys())}")
         return self.method_dict[method](temperature)
 
-    def get_current_for_temperature(self, target_temperature: Union[float, np.ndarray], degrees: Union[int, List[int]] = 5) -> np.ndarray:
+    def get_current_for_temperature(self, target_temperature: float | np.ndarray, degrees: int | list[int] = 5) -> np.ndarray:
         r"""
         Calculate the current density J(T) for each target temperature by first applying a polynomial fit
         to EQE(T,\lambda) as a function of temperature at each wavelength \lambda\lambda,
@@ -1102,7 +1154,7 @@ class EQET(EQE):
         sr = self.eqe.T / np.asarray(convert.wavelength_to_photonenergy(self.wavelength.flatten()))
         return sr.T
 
-    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: Union[float, np.ndarray] = 25, sjuncs: Union[str, None] = None) -> None:  # ty: ignore[invalid-method-override]
+    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: float | np.ndarray = 25, sjuncs: str | None = None) -> None:  # ty: ignore[invalid-method-override]
         """
         Add EQE(T)
 
@@ -1119,7 +1171,7 @@ class EQET(EQE):
         self.temperature = np.concatenate((self.temperature, temperature_add))
         self._sort_by_temperature()
 
-    def plot(self, fig: Union[plt.Figure, None] = None, ax: Union[plt.Axes, None] = None) -> Tuple[plt.Axes, plt.Axes]:  # ty: ignore[invalid-method-override]
+    def plot(self, fig: plt.Figure | None = None, ax: plt.Axes | None = None) -> tuple[plt.Axes, plt.Axes]:  # ty: ignore[invalid-method-override]
         """
         Plot the EQE(T). Lines are colored by temperature.
 
@@ -1164,7 +1216,7 @@ class EQET(EQE):
         rax = ax.twinx()  # right axis
         return ax, rax
 
-    def plot_sr(self, fig: Union[plt.Figure, None] = None, ax: Union[plt.Axes, None] = None) -> Tuple[plt.Figure, plt.Axes]:
+    def plot_sr(self, fig: plt.Figure | None = None, ax: plt.Axes | None = None) -> tuple[plt.Figure, plt.Axes]:
         """
         Plot the spectral response SR(T). Lines are colored by temperature.
 
@@ -1235,7 +1287,7 @@ def _linear_model(temperature: np.ndarray, p0: float, p1: float) -> np.ndarray:
     return p0 * temperature + p1
 
 
-def _polynomial_model(order: int) -> Tuple[Callable, List[float]]:
+def _polynomial_model(order: int) -> tuple[Callable, list[float]]:
     """
     Generates a polynomial model function of a specified order and an initial guess.
 
@@ -1305,7 +1357,7 @@ def _spline3(temperature: np.ndarray, *params: float) -> np.ndarray:
     return spline(temperature)
 
 
-def _spline_model(spline_order: int) -> Tuple[Callable, List[float]]:
+def _spline_model(spline_order: int) -> tuple[Callable, list[float]]:
     """
     Generates a spline model function of a specified order with extrapolation enabled.
 
@@ -1336,7 +1388,7 @@ class ModelType(Enum):
     PHONON_BOSE = ("phonon_bose", _phonon_bose_model, [0.5, 0.5, 0.015], ([0.0, 0.0, 0.010], [np.inf, np.inf, 0.020]))  # [sigma_0, sigma_ph, omega_ph]
     # SPLINE3 = ("cubic_spline", _spline3, [1.0] * 5)
 
-    def __init__(self, name: str, function: Callable, initial_guess: List[float], bounds=None):
+    def __init__(self, name: str, function: Callable, initial_guess: list[float], bounds=None):
         self._function = function
         self._initial_guess = initial_guess
         self._bounds = bounds  # (lower, upper) for least_squares, or None for unconstrained
@@ -1346,7 +1398,7 @@ class ModelType(Enum):
         return self._function
 
     @property
-    def initial_guess(self) -> List[float]:
+    def initial_guess(self) -> list[float]:
         return self._initial_guess
 
     @property
@@ -1358,7 +1410,7 @@ class ModelType(Enum):
         return ([-np.inf] * n, [np.inf] * n)
 
 
-def _model_residuals(params: Tuple[float, ...], func: Callable, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+def _model_residuals(params: tuple[float, ...], func: Callable, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """
     Residual calculation for least squares
     Args:
@@ -1382,7 +1434,7 @@ def _model_residuals(params: Tuple[float, ...], func: Callable, x: np.ndarray, y
     return weights * (y - predicted).ravel()
 
 
-def _calc_mic(temperature: np.ndarray, predicted: np.ndarray, actual: np.ndarray, params: Tuple[float, ...]) -> Tuple[float, float]:
+def _calc_mic(temperature: np.ndarray, predicted: np.ndarray, actual: np.ndarray, params: tuple[float, ...]) -> tuple[float, float]:
     """
     Calcualtes the model information criterion (mic). Can be either Akaike, Bayesian or penalized versions of these.
 
@@ -1410,7 +1462,7 @@ class TemperatureModel:
     Temperature model for bandgap and sigma
     """
 
-    def __init__(self, model_type: ModelType, params: List[float], Tref: float = 25, ref_value: Optional[float] = None):
+    def __init__(self, model_type: ModelType, params: list[float], Tref: float = 25, ref_value: float | None = None):
         """
         Initializes the model with a specified type and parameters.
 
@@ -1430,7 +1482,7 @@ class TemperatureModel:
         self.Tref = Tref
         self.ref_value = ref_value
 
-    def apply(self, temperature: Union[float, np.ndarray], ref_value: Optional[float] = None) -> Union[float, np.ndarray]:
+    def apply(self, temperature: float | np.ndarray, ref_value: float | None = None) -> float | np.ndarray:
         r"""
         Applies the specified model to temperature and scales it with a reference value.
 
@@ -1454,7 +1506,7 @@ class TemperatureModel:
         return model_func(temperature, *self.params) * ref_value
 
     @classmethod
-    def fit(cls, x: np.ndarray, y: np.ndarray, plot: Union[str, None] = None, model_types: Union[ModelType, List[ModelType], None] = None, Tref: float = 25) -> "TemperatureModel":
+    def fit(cls, x: np.ndarray, y: np.ndarray, plot: str | None = None, model_types: ModelType | list[ModelType] | None = None, Tref: float = 25) -> TemperatureModel:
         """
         Fits multiple models to the data and returns an instance of the best-fitting model, parameters, and MSE.
 
