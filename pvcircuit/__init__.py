@@ -56,7 +56,7 @@ JintMD = qe.JintMD
 PintMD = qe.PintMD
 EQE = qe.EQE
 
-VERSION = 0.05
+VERSION = "0.0.6"
 
 __author__ = "John Geisz"
 __email__ = "john.geisz@nrel.gov"

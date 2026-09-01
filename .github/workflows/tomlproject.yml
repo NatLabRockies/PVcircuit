@@ -20,8 +20,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
       # Install
-      - name: Set up Python and Install Dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip  # Ensure pip is up to date
           python -m pip install .[test]  # Install the package with development dependencies from pyproject.toml
