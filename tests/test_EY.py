@@ -682,6 +682,32 @@ def test_meteo_input_validation():
     np.testing.assert_allclose(m2.energy_in, m.energy_in)
 
 
+def test_meteo_retains_uncomputable_rows_as_zero_output():
+    m, irr, t = _synthetic_meteo(ndays=1)
+    spectra = m.spectra.copy()
+    temperature = pd.Series(20.0, index=t)
+    wind = pd.Series(1.0, index=t)
+    spectra.iloc[5, 0] = np.nan
+    spectra.iloc[6, 1] = np.inf
+    temperature.iloc[12] = np.nan
+    wind.iloc[13] = np.inf
+
+    retained = Meteo(m.wavelength, spectra, temperature, wind, t)
+
+    assert retained.datetime.equals(t)
+    assert retained.spectra.iloc[5, 0] == 0.0
+    assert retained.spectra.iloc[6, 1] == 0.0
+    assert np.isnan(retained.cell_temp.iloc[12])
+    assert not np.isfinite(retained.cell_temp.iloc[13])
+    np.testing.assert_allclose(retained.dt.to_numpy(), m.dt.to_numpy())
+
+    _populate(retained, irr)
+    retained.run_ey(pvc.Tandem3T(), "CM", multiprocessing=False)
+    assert retained.results is not None
+    assert retained.results["Pmp"].iloc[12] == 0.0
+    assert retained.results["Pmp"].iloc[13] == 0.0
+
+
 def test_reindex_aligns_numpy_arrays_and_energy_in():
     m, irr, t = _synthetic_meteo(ndays=2)
     _populate(m, irr)

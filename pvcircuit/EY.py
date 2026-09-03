@@ -4,7 +4,7 @@ Package to simulate energy yield
 
 import copy
 import multiprocessing as mp
-from typing import List, Optional, Tuple, Union
+from typing import Tuple, Union
 
 import numpy as np  # arrays
 import pandas as pd
@@ -65,7 +65,7 @@ def VMloss(model: Union["pvc.Tandem3T", "pvc.Multi2T"], oper: str, ncells: int) 
 
 
 # @lru_cache(maxsize=100)
-def VMlist(mmax: int) -> List[str]:
+def VMlist(mmax: int) -> list[str]:
     """
     generate a list of 3T VM configurations + 'MPP'=4T and 'CM'=2T
     mmax < 10 for formating reasons
@@ -83,7 +83,7 @@ def VMlist(mmax: int) -> List[str]:
     return sVM
 
 
-def sandia_T(poa_global: Union[float, np.ndarray, pd.Series], wind_speed: Union[float, np.ndarray, pd.Series], temp_air: Union[float, np.ndarray, pd.Series]) -> Union[float, np.ndarray, pd.Series]:
+def sandia_T(poa_global: float | np.ndarray | pd.Series, wind_speed: float | np.ndarray | pd.Series, temp_air: float | np.ndarray | pd.Series) -> float | np.ndarray | pd.Series:
     r"""
     Calculate the solar cell temperature using the Sandia model.
 
@@ -144,9 +144,9 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
     from one timestep to the next.
 
     Rows without photocurrent (all Jsc == 0, e.g. night) or with non-finite
-    Jsc produce zero output (Pmp = Isc = Imp = 0, Voc = Vmp = 0). Multi2T.MPP()
-    returns NaN at zero photocurrent, which would otherwise poison the time
-    integral of the whole year.
+    current, bandgap, sigma, or cell temperature produce zero output
+    (Pmp = Isc = Imp = 0, Voc = Vmp = 0). Multi2T.MPP() returns NaN at zero
+    photocurrent, which would otherwise poison the time integral of the year.
     """
 
     columns: list[str] = ["Voc", "Isc", "Vmp", "Imp", "Pmp"]
@@ -154,9 +154,18 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
 
     for i in range(len(Jscs)):
         row_jsc = np.asarray(Jscs[i], dtype=np.float64)
+        row_eg = np.asarray(Egs[i], dtype=np.float64)
+        row_sigma = np.asarray(sigmas[i], dtype=np.float64)
+        row_temp = float(TempCell.iloc[i])
         # Same threshold as Multi2T.MPP (1e-6 A/cm^2 = 1e-3 mA/cm^2), which
         # returns NaN below it.
-        if not np.all(np.isfinite(row_jsc)) or np.max(row_jsc) <= 1e-3:
+        if (
+            not np.all(np.isfinite(row_jsc))
+            or not np.all(np.isfinite(row_eg))
+            or not np.all(np.isfinite(row_sigma))
+            or not np.isfinite(row_temp)
+            or np.max(row_jsc) <= 1e-3
+        ):
             # zero output; the DataFrame is pre-filled with zeros
             continue
 
@@ -164,7 +173,7 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
             for ijunc in range(model.njuncs):
                 # Jscs is stored in mA/cm^2 (Meteo.add_currents); junction.Jext
                 # expects A/cm^2, so divide by 1000.
-                model.j[ijunc].set(Eg=Egs[i, ijunc], sigma=sigmas[i, ijunc], Jext=Jscs[i, ijunc] / 1e3, TC=TempCell.iloc[i])
+                model.j[ijunc].set(Eg=row_eg[ijunc], sigma=row_sigma[ijunc], Jext=row_jsc[ijunc] / 1e3, TC=row_temp)
 
             mpp_dict = model.MPP()
             # Pmax = mpp_dict["Pmp"]
@@ -175,8 +184,8 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
             tandem_type = oper.split("-")
 
             # Jscs in mA/cm^2 -> A/cm^2 for junction.Jext, same conversion as above.
-            model.top.set(Eg=Egs[i, 0], sigma=sigmas[i, 0], Jext=Jscs[i, 0] / 1e3, TC=TempCell.iloc[i])
-            model.bot.set(Eg=Egs[i, 1], sigma=sigmas[i, 1], Jext=Jscs[i, 1] / 1e3, TC=TempCell.iloc[i])
+            model.top.set(Eg=row_eg[0], sigma=row_sigma[0], Jext=row_jsc[0] / 1e3, TC=row_temp)
+            model.bot.set(Eg=row_eg[1], sigma=row_sigma[1], Jext=row_jsc[1] / 1e3, TC=row_temp)
             if tandem_type[0] == "MPP":
                 tempRz = model.Rz
                 model.set(Rz=0)
@@ -235,10 +244,13 @@ class Meteo:
     (trapezoid weights of the original timeline). They are kept when rows are
     filtered, so filtered copies integrate only the rows they contain.
 
-    Spectra: NaN entries are replaced by 0 (a partially missing spectrum still
-    contributes its remaining bands to the irradiance). Feed the *filled* spectra
-    (``Meteo.spectra``, ``Meteo.wavelength``) to :meth:`EQE.add_spectra` so that
-    the Jsc time series stays aligned with ``cell_temp`` and does not contain NaN.
+    Non-finite spectral entries are replaced by 0 (a partially missing spectrum
+    still contributes its remaining bands to the irradiance). Timestamps with
+    non-finite ambient temperature or wind are retained with a non-finite cell
+    temperature; :meth:`run_ey` assigns zero output to those rows. Feed the
+    *filled* spectra (``Meteo.spectra``, ``Meteo.wavelength``) to
+    :meth:`EQE.add_spectra` so that the Jsc time series stays aligned with
+    ``cell_temp``.
     """
 
     def __init__(self, wavelength: np.ndarray, spectra: pd.DataFrame, ambient_temperature: pd.Series, wind: pd.Series, datetime: pd.DatetimeIndex) -> None:
@@ -255,28 +267,32 @@ class Meteo:
         if spectra.shape[1] != len(wavelength):
             raise ValueError(f"Meteo: spectra has {spectra.shape[1]} columns but wavelength has {len(wavelength)} entries; spectra must be (n_times, n_wavelengths)")
 
-        # Replace NaN values in spectra with 0 to ensure data integrity
-        n_nan_rows = int(spectra.isna().any(axis=1).sum())
-        if n_nan_rows > 0:
+        # Retain the complete timeline. Missing spectral bands carry no power,
+        # and rows lacking weather inputs are made explicit zero-output rows by
+        # run_ey rather than being removed and bridged during time integration.
+        nonfinite_spectra = ~np.isfinite(spectra.to_numpy(dtype=np.float64))
+        n_nonfinite_spectra_rows = int(nonfinite_spectra.any(axis=1).sum())
+        if n_nonfinite_spectra_rows > 0:
             logger.warning(
-                "Meteo: {} of {} spectra rows contain NaN; they are filled with 0 (partial irradiance still counts). Use Meteo.spectra for EQE.add_spectra so Jsc has no NaN.",
-                n_nan_rows,
+                "Meteo: {} of {} spectra rows contain non-finite values; they are filled with 0 (partial irradiance still counts). Use Meteo.spectra for EQE.add_spectra so Jsc stays finite.",
+                n_nonfinite_spectra_rows,
                 nrows,
             )
-        spectra = spectra.fillna(0)
-        # Create a filter to drop any remaining NaNs in ambient_temperature or wind
-        # (positional numpy masks: the pandas indexes of the inputs need not agree)
-        ffilter = np.all(np.isfinite(spectra.to_numpy()), axis=1) & np.isfinite(ambient_temperature.to_numpy()) & np.isfinite(wind.to_numpy())
-        if not ffilter.all():
-            logger.warning("Meteo: dropping {} rows with non-finite temperature/wind", int((~ffilter).sum()))
+        spectra = spectra.mask(nonfinite_spectra, 0.0)
+        invalid_weather = ~np.isfinite(ambient_temperature.to_numpy()) | ~np.isfinite(wind.to_numpy())
+        if invalid_weather.any():
+            logger.warning(
+                "Meteo: retaining {} rows with non-finite temperature/wind; run_ey will assign zero output to those timestamps",
+                int(invalid_weather.sum()),
+            )
         # `spectra` keeps its own row index (whatever the caller used); the
         # datetime is kept separately in self.datetime.
-        self.temp = pd.Series(ambient_temperature.to_numpy()[ffilter], index=datetime[ffilter])  # Ambient temperature in degrees Celsius
-        self.wind = pd.Series(wind.to_numpy()[ffilter], index=datetime[ffilter])  # Wind speed in meters per second
-        self.datetime = datetime[ffilter]  # Filtered datetime index
+        self.temp = pd.Series(ambient_temperature.to_numpy(), index=datetime)  # Ambient temperature in degrees Celsius
+        self.wind = pd.Series(wind.to_numpy(), index=datetime)  # Wind speed in meters per second
+        self.datetime = datetime
 
         self.wavelength = wavelength
-        self.spectra = spectra.iloc[ffilter]  # Spectral data after filtering
+        self.spectra = spectra
 
         if wavelength.max() < _MIN_BROADBAND_WAVELENGTH_NM:
             logger.warning(
@@ -286,10 +302,12 @@ class Meteo:
 
         # Calculate irradiance from spectral proxy data
         self.irradiance = pd.Series(trapezoid(y=self.spectra.to_numpy(), x=self.wavelength), index=self.datetime)  # Optical power of each spectrum [W/m^2]
-        self.cell_temp: pd.Series = pd.Series(
+        cell_temp = np.asarray(
             sandia_T(self.irradiance.to_numpy(), self.wind.to_numpy(), self.temp.to_numpy()),
-            index=self.datetime,
-        )  # Cell temperature calculation
+            dtype=np.float64,
+        )
+        cell_temp[invalid_weather] = np.nan
+        self.cell_temp: pd.Series = pd.Series(cell_temp, index=self.datetime)  # Cell temperature calculation
         # Per-row integration weights [s] (see _time_weights). Uses
         # `(datetime - datetime[0]).total_seconds()`, which is pandas-native and
         # resolution-agnostic (pandas 2.x [ns] and 3.x [us]).
@@ -301,6 +319,7 @@ class Meteo:
         self.jscs = None  # Short-circuit currents
         self.bandgaps = None  # Bandgap energies
         self.sigmas = None  # Sigma values
+        self.results: pd.DataFrame | None = None
 
     def _add_array(self, array: np.ndarray, attribute_name: str) -> None:
         """
@@ -378,7 +397,7 @@ class Meteo:
             return 2
         raise ValueError(f"Unknown model type: {type(model).__name__}")
 
-    def run_ey(self, model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str, multiprocessing: bool = True) -> Tuple[float, float]:
+    def run_ey(self, model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str, multiprocessing: bool = True) -> tuple[float, float]:
         """
         Calculate the energy yield and efficiency based on the provided model and operation mode.
 
@@ -434,7 +453,6 @@ class Meteo:
                 """Callback function to update the progress bar."""
                 pbar.update(len(args[0]))
                 pbar.refresh()
-                return
 
             if multiprocessing:
                 pbar.set_description(f"Running {model.name} in mode {oper} with {cpu_count} processes")
@@ -534,7 +552,7 @@ class Meteo:
             attr = getattr(self_copy, attr_name)
             if attr is not None:
                 setattr(self_copy, attr_name, attr[mask])
-        if getattr(self_copy, "results", None) is not None:
+        if self_copy.results is not None:
             self_copy.results = self_copy.results[mask]
 
         # energy_in was integrated over the unfiltered rows; recompute so
@@ -587,7 +605,7 @@ class Meteo:
         """
         return self._apply_row_mask(np.asarray(filter_array, dtype=bool))
 
-    def reindex(self, index: pd.Index, method: str = "nearest", tolerance: Optional[pd.Timedelta] = None) -> "Meteo":
+    def reindex(self, index: pd.Index, method: str = "nearest", tolerance: pd.Timedelta | None = None) -> "Meteo":
         """
         Reindex the data according to the provided time indexer.
 
