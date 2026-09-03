@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Package to simulate energy yield
 """
