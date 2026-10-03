@@ -14,11 +14,15 @@ from scipy.integrate import trapezoid
 from tqdm import tqdm
 
 import pvcircuit as pvc
+from pvcircuit import junction
 
 # Below this upper wavelength bound the integrated spectra can no longer be
 # regarded as broadband plane-of-array irradiance (AM1.5G carries ~5 % of its
 # power above 2500 nm) -- cell temperature and energy_in would be biased.
 _MIN_BROADBAND_WAVELENGTH_NM = 2500.0
+
+# Timesteps solved per call of a *_rows method in run_ey; bounds the size of the work arrays.
+_ROWS_PER_CALL = 20000
 
 
 def VMloss(model: Union["pvc.Tandem3T", "pvc.Multi2T"], oper: str, ncells: int) -> float:
@@ -194,15 +198,17 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
             elif tandem_type[0] == "CM":
                 ln, iv3T = model.CM()
             elif tandem_type[0] == "VM":
-                if len(tandem_type) != 3:
+                if len(tandem_type) != 3 or tandem_type[2] not in ("r", "s"):
                     raise ValueError("3T voltage matched operation must be VM-[bc/tc ratio]-[r/s-type], e.g. VM-21-r")
-                model.bot.pn = -1 * model.top.pn if tandem_type[2] == "r" else 1 * model.top.pn
+                # pvcircuit convention: equal pn is r-type (junctions reversed
+                # against each other), opposite pn is s-type (series connected)
+                model.bot.pn = model.top.pn if tandem_type[2] == "r" else -1 * model.top.pn
                 ln, iv3T = model.VM(*map(int, tandem_type[1]))
             else:
                 raise ValueError(f"Unknown 3T operation mode: {oper!r}")
             assert isinstance(iv3T, pvc.iv3T.IV3T)
             # Load-terminal quantities: VA - VB and min(|IA|, |IB|) equal the
-            # tandem Vmp/Imp (and Voc/Isc below) for CM operation; for MPP/VM they
+            # tandem Vmp/Imp (and Voc below) for CM operation; for MPP/VM they
             # are the terminal values of the load configuration. Pmp (Ptot) is
             # the total device output in every mode.
             IV_params.loc[i, "Vmp"] = iv3T.VA - iv3T.VB
@@ -212,8 +218,14 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
             iv3T = model.Voc3()
             IV_params.loc[i, "Voc"] = iv3T.VA - iv3T.VB
 
-            iv3T = model.Isc3()
-            IV_params.loc[i, "Isc"] = min(abs(iv3T.IA), abs(iv3T.IB))
+            if tandem_type[0] == "CM" and model.top.pn * model.bot.pn == -1:
+                # CM leaves the z contact floating, so the short circuit is the
+                # 2T one (Vtr = 0, Izo = 0). Isc3 shorts all three terminals and
+                # lets z carry the mismatch current.
+                IV_params.loc[i, "Isc"] = pvc.Multi2T.from_3T(model).Isc()
+            else:
+                iv3T = model.Isc3()
+                IV_params.loc[i, "Isc"] = min(abs(iv3T.IA), abs(iv3T.IB))
 
         else:
             raise ValueError(f"Unknown model type: {type(model).__name__}")
@@ -223,9 +235,112 @@ def _calc_yield_async(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, Tem
     if not np.all(np.isfinite(IV_params.to_numpy())):
         nbad = int((~np.isfinite(IV_params.to_numpy())).any(axis=1).sum())
         logger.warning("_calc_yield_async: {} of {} timesteps returned non-finite IV parameters; set to 0", nbad, len(IV_params))
+        # No operating point (0 in every column, as without light): a non-finite Pmp, or the placeholder point
+        # Tandem3T.CM() / VM() return when no point has positive power (Ptot 0.0, VA / VB / IA / IB nan).
+        Pmp = IV_params["Pmp"].to_numpy()
+        no_point = ~np.isfinite(Pmp) | (~(Pmp > 0.0) & ~np.isfinite(IV_params[["Vmp", "Imp"]].to_numpy()).all(axis=1))
+        IV_params.loc[no_point, :] = 0.0
         IV_params = IV_params.fillna(0.0).replace([np.inf, -np.inf], 0.0)
 
     return IV_params  # Pmax in [W]
+
+
+def _solves_all_rows(model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str) -> bool:
+    """Whether run_ey can solve all timesteps at once with the *_rows methods of ``model``.
+
+    True for every Multi2T, and for a Tandem3T in "MPP" and "VM-xy-r/s"
+    operation and in "CM" operation with series-connected junctions (s-type,
+    opposite pn; with the z contact floating that is the 2T stack
+    Multi2T.from_3T(model)). Everything else is solved timestep by timestep.
+    """
+    if isinstance(model, pvc.Multi2T):
+        return True
+    if not isinstance(model, pvc.Tandem3T) or model.top.beta > 0.0 or model.top.notdiode() or model.bot.notdiode():
+        return False
+    tandem_type = oper.split("-")
+    if tandem_type[0] == "CM":
+        return model.top.pn * model.bot.pn == -1
+    if tandem_type[0] == "MPP":
+        return True
+    if tandem_type[0] == "VM":
+        return len(tandem_type) == 3 and tandem_type[2] in ("r", "s") and tandem_type[1].isdigit() and len(tandem_type[1]) == 2 and "0" not in tandem_type[1]
+    return False
+
+
+def _solve_rows(model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str, TC: np.ndarray, Eg: np.ndarray, sigma: np.ndarray, Jext: np.ndarray) -> np.ndarray:
+    """IV parameters (Voc, Isc, Vmp, Imp, Pmp) of all rows at once: the *_rows twin of the loop body of _calc_yield_async.
+
+    Jext in A/cm^2. Returns a (rows, 5) array with np.nan in every row that
+    has no solution. ``model`` and ``oper`` must satisfy _solves_all_rows.
+    """
+    if isinstance(model, pvc.Multi2T):
+        mpp = model.MPP_rows(TC, Eg, sigma, Jext)
+        return np.column_stack([mpp[col] for col in ("Voc", "Isc", "Vmp", "Imp", "Pmp")])
+
+    tandem_type = oper.split("-")
+    if tandem_type[0] == "CM":
+        mpp = pvc.Multi2T.from_3T(model).MPP_rows(TC, Eg, sigma, Jext)
+        # the load voltage VA - VB of a Tandem3T follows the polarity of the device
+        vsign = -float(model.top.pn)
+        return np.column_stack([vsign * mpp["Voc"], mpp["Isc"], vsign * mpp["Vmp"], mpp["Imp"], mpp["Pmp"]])
+
+    dev = model.copy()
+    if tandem_type[0] == "MPP":
+        dev4T = model.copy()
+        dev4T.set(Rz=0)
+        iv3T = dev4T.MPP_rows(TC, Eg, sigma, Jext)
+    else:
+        # pvcircuit convention: equal pn is r-type, opposite pn is s-type
+        dev.bot.pn = dev.top.pn if tandem_type[2] == "r" else -1 * dev.top.pn
+        iv3T = dev.VM_rows(*map(int, tandem_type[1]), TC, Eg, sigma, Jext)
+    voc = dev.Voc3_rows(TC, Eg, sigma, Jext)
+    isc = dev.Isc3_rows(TC, Eg, sigma, Jext)
+    values = np.column_stack([voc.VA - voc.VB, np.minimum(np.abs(isc.IA), np.abs(isc.IB)), iv3T.VA - iv3T.VB, np.minimum(np.abs(iv3T.IA), np.abs(iv3T.IB)), iv3T.Ptot])
+    # IV3T.Pcalc marks an undefined power with -100 instead of np.nan
+    solved = np.isfinite(iv3T.IA) & np.isfinite(iv3T.IB) & np.isfinite(iv3T.VA) & np.isfinite(iv3T.VB)
+    values[~solved] = np.nan
+    return values
+
+
+def _calc_yield_rows(Jscs: np.ndarray, Egs: np.ndarray, sigmas: np.ndarray, TempCell: pd.Series, model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str) -> pd.DataFrame:
+    """Evaluate IV parameters for one chunk of timesteps, all rows at once.
+
+    Twin of _calc_yield_async for the devices and modes of _solves_all_rows,
+    with the same zero-output rule for rows without photocurrent or with
+    non-finite inputs. A row the *_rows methods do not solve, and a row with
+    a negative photocurrent, is handed to _calc_yield_async, so the result is
+    never worse than timestep by timestep.
+    """
+    columns: list[str] = ["Voc", "Isc", "Vmp", "Imp", "Pmp"]
+    Jscs = np.asarray(Jscs, dtype=np.float64)
+    Egs = np.asarray(Egs, dtype=np.float64)
+    sigmas = np.asarray(sigmas, dtype=np.float64)
+    temp = TempCell.to_numpy(dtype=np.float64)
+    out = np.zeros((len(Jscs), len(columns)))
+
+    # Same threshold as Multi2T.MPP (1e-6 A/cm^2 = 1e-3 mA/cm^2).
+    with np.errstate(invalid="ignore"):
+        valid = np.isfinite(Jscs).all(axis=1) & np.isfinite(Egs).all(axis=1) & np.isfinite(sigmas).all(axis=1) & np.isfinite(temp) & (np.max(Jscs, axis=1) > 1e-3)
+        # A negative photocurrent has no generating operating point for the
+        # *_rows methods to search; such a row keeps the timestep-by-timestep solver.
+        negative = valid & (Jscs < 0.0).any(axis=1)
+    rows = np.flatnonzero(valid & ~negative)
+    failed = np.flatnonzero(negative)
+    if rows.size:
+        # Jscs is stored in mA/cm^2 (Meteo.add_currents); the devices expect A/cm^2.
+        values = _solve_rows(model, oper, temp[rows], Egs[rows], sigmas[rows], Jscs[rows] / 1e3)
+        out[rows] = values
+        failed = np.concatenate([failed, rows[~np.isfinite(values).all(axis=1)]])
+    if failed.size:
+        logger.warning("_calc_yield_rows: {} of {} timesteps not solved all at once; solving them timestep by timestep", failed.size, len(Jscs))
+        out[failed] = _calc_yield_async(Jscs[failed], Egs[failed], sigmas[failed], TempCell.iloc[failed], copy.deepcopy(model), oper).to_numpy()
+
+    return pd.DataFrame(out, columns=columns)  # Pmax in [W]
+
+
+def _set_solver(solver: str) -> None:
+    """Pool initializer: worker processes follow the solver setting of the parent."""
+    junction.SOLVER = solver
 
 
 class Meteo:
@@ -397,14 +512,27 @@ class Meteo:
             return 2
         raise ValueError(f"Unknown model type: {type(model).__name__}")
 
-    def run_ey(self, model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str, multiprocessing: bool = True) -> tuple[float, float]:
+    def run_ey(self, model: Union["pvc.Multi2T", "pvc.Tandem3T"], oper: str, multiprocessing: bool = True, vectorized: Union[bool, None] = None) -> tuple[float, float]:
         """
         Calculate the energy yield and efficiency based on the provided model and operation mode.
 
         Args:
             model (Union["pvc.Multi2T", "pvc.Tandem3T"]): Either a Multi2T or Tandem3T model.
             oper (str): Operation mode, e.g., 'MPP', 'CM', 'VM-21-r', 'VM-21-s'.
-            multiprocessing (bool, optional): Whether to use multiprocessing. Defaults to True.
+            multiprocessing (bool, optional): Whether to use multiprocessing for the
+                timestep-by-timestep solver. Defaults to True.
+            vectorized (bool, optional): Solve all timesteps at once with the *_rows
+                methods of the device (Multi2T.MPP_rows, Tandem3T.MPP_rows / VM_rows);
+                ``multiprocessing`` is not used then. False solves timestep by
+                timestep. Also with True, timestep by timestep are solved: the whole
+                run of a Tandem3T that is r-type in 'CM' operation, has top.beta > 0
+                or a resistor-only junction, or has a 'VM' label other than three
+                parts with a two-digit ratio of non-zero digits and an 'r' or 's'
+                suffix, such as 'VM-21-r' (with the process pool when
+                ``multiprocessing`` is True); the rows with a negative photocurrent
+                and the rows the *_rows methods return unsolved (in the calling
+                process, whatever ``multiprocessing`` is). Defaults to None: True
+                unless pvcircuit.junction.SOLVER is "legacy".
 
         Raises:
             ValueError: If data array sizes are inconsistent with cell temperature, or if
@@ -447,6 +575,10 @@ class Meteo:
         # row-varying state (Eg, sigma, Jext, TC) on every iteration.
         chunks = [chunk_ids[i : i + chunk_size] for i in range(0, len(chunk_ids), chunk_size)]
 
+        if vectorized is None:
+            vectorized = not junction._legacy_solver()
+        all_rows = bool(vectorized) and _solves_all_rows(model, oper)
+
         with tqdm(total=len(self.datetime), leave=True) as pbar:
 
             def update_tqdm(*args):
@@ -454,10 +586,22 @@ class Meteo:
                 pbar.update(len(args[0]))
                 pbar.refresh()
 
-            if multiprocessing:
+            if all_rows:
+                pbar.set_description(f"Running {model.name} in mode {oper} vectorized")
+
+                result_dfs = []
+                for start in range(0, len(chunk_ids), _ROWS_PER_CALL):
+                    chunk = chunk_ids[start : start + _ROWS_PER_CALL]
+                    result_dfs.append(_calc_yield_rows(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], model, oper))
+                    pbar.update(len(chunk))
+                    pbar.refresh()
+
+                results = pd.concat(result_dfs, ignore_index=True)
+
+            elif multiprocessing:
                 pbar.set_description(f"Running {model.name} in mode {oper} with {cpu_count} processes")
 
-                with mp.Pool(cpu_count) as pool:
+                with mp.Pool(cpu_count, initializer=_set_solver, initargs=(junction.SOLVER,)) as pool:
                     # Assign tasks to multiprocessing pool
                     # For multiprocessing
                     jobs = [

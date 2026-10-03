@@ -478,6 +478,33 @@ def test_Multi2T_from_3T_preserves_junction_params(dev3T):
     assert dev2T_dyn.j[1] is dev3T.bot
 
 
+@pytest.mark.parametrize(
+    "top, bot",
+    [
+        (dict(Jext=0.012), {}),
+        (dict(Jext=0.0139), {}),
+        ({}, dict(Jext=0.012)),
+        (dict(Jext=0.012, Gsh=5e-4), dict(Gsh=5e-4)),
+    ],
+)
+def test_specialpoints_current_mismatched(top, bot):
+    """The 2T short-circuit point (Vtr = 0, Izo = 0) must exist for mismatched tandems.
+
+    Regression: VI0('VtrIzo') and therefore specialpoints() raised
+    'Could not bracket I2T root' for any current-mismatched s-type device.
+    """
+    dev3T = Tandem3T()
+    dev3T.top.set(**top)
+    dev3T.bot.set(**bot)
+    special_points = dev3T.specialpoints(fast=True)
+    assert special_points.shape[0] == 5
+
+    point = dev3T.VI0("VtrIzo")
+    assert point.Izo[0] == 0.0
+    np.testing.assert_allclose(abs(point.Ito[0]), Multi2T.from_3T(dev3T).Isc(), rtol=1e-6)
+    np.testing.assert_allclose(point.Iro[0], -point.Ito[0])
+
+
 def generate_test_files():
     """Generate all baseline test files. Run: python tests/test_tandem3T.py"""
     global REGENERATE_TEST_FILES

@@ -254,6 +254,242 @@ def test_I2Troot_at_boundaries(dev2T):
     assert dev2T.I2Troot(voc + 1e-3) > 0
 
 
+def _mismatched_stacks():
+    """Current-mismatched 2T stacks whose short circuit lies off the photocurrent boundaries."""
+
+    def build(top=None, bot=None):
+        dev3T = Tandem3T()
+        dev3T.top.set(**(top or {}))
+        dev3T.bot.set(**(bot or {}))
+        return Multi2T.from_3T(dev3T)
+
+    return {
+        "top_limited": build(top=dict(Jext=0.012)),
+        "bottom_limited_LC": build(bot=dict(Jext=0.012)),
+        "bottom_limited_no_LC": build(bot=dict(Jext=0.012, beta=0.0)),
+        "slightly_top_limited": build(top=dict(Jext=0.0139)),
+        "top_limited_shunted": build(top=dict(Jext=0.012, Gsh=5e-4), bot=dict(Gsh=5e-4)),
+        "top_limited_JFG": build(top=dict(Jext=0.012, RBB="JFG"), bot=dict(RBB="JFG")),
+        "top_limited_bishop": build(top=dict(Jext=0.012, RBB="bishop", Gsh=1e-3), bot=dict(RBB="bishop", Gsh=1e-3)),
+        "strongly_top_limited_leaky": build(top=dict(Jext=0.002, Gsh=2e-2), bot=dict(Gsh=2e-2)),
+    }
+
+
+@pytest.mark.parametrize("name", _mismatched_stacks())
+def test_I2Troot_mismatched_stack(name):
+    """I2Troot must find the current for any V <= Voc and agree with the stepping I2T.
+
+    Regression: it raised 'Could not bracket I2T root' whenever the root was
+    not at a junction photocurrent (shunt, breakdown, luminescent coupling)
+    or lay on the saturated branch of an unshunted limiting junction.
+    """
+    dev2T = _mismatched_stacks()[name]
+    for V in np.linspace(-0.5, dev2T.Voc(), 9):
+        stepped = dev2T._I2T_stepping(V)  # resolves 1e-7 of the limiting current
+        np.testing.assert_allclose(dev2T.I2Troot(V), stepped, rtol=1e-6, atol=1e-12)
+
+
+def test_I2Troot_saturated_branch_returns_limiting_current():
+    """Unshunted limiting junction: below its saturation the IV curve is vertical."""
+    dev3T = Tandem3T()
+    dev3T.top.set(Jext=0.012)
+    dev2T = Multi2T.from_3T(dev3T)
+    limiting = float(dev2T.j[0].Jext + dev2T.j[0].J0.sum())
+    for V in (-1.0, 0.0, 0.3):
+        np.testing.assert_allclose(dev2T.I2Troot(V), -limiting, rtol=1e-12)
+
+
+class _Solver:
+    """Context manager: run a block with pvcircuit.junction.SOLVER set to ``name``."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        self.previous = pvc.junction.SOLVER
+        pvc.junction.SOLVER = self.name
+
+    def __exit__(self, *exc):
+        pvc.junction.SOLVER = self.previous
+
+
+def _iv_stacks():
+    """2T stacks for the I2T tests: matched, mismatched, shunted, with breakdown, 1 and 3 junctions."""
+
+    def tandem(top=None, bot=None, Rs2T=0.0):
+        dev = Multi2T()
+        dev.j[0].set(**(top or {}))
+        dev.j[1].set(**(bot or {}))
+        dev.set(Rs2T=Rs2T)
+        return dev
+
+    return {
+        "default": tandem(),
+        "top_limited": tandem(top=dict(Jext=0.012)),
+        "bottom_limited_LC": tandem(bot=dict(Jext=0.012)),
+        "shunted_Rs2T": tandem(top=dict(Gsh=5e-4), bot=dict(Gsh=5e-4), Rs2T=2.0),
+        "top_limited_JFG": tandem(top=dict(Jext=0.012, RBB="JFG"), bot=dict(RBB="JFG")),
+        "three_junctions": Multi2T(Eg_list=[1.9, 1.4, 1.0]),
+        "single_junction": Multi2T.from_single_junction(pvc.junction.Junction(Eg=1.12, Rser=0.5, Gsh=1e-4)),
+    }
+
+
+@pytest.mark.parametrize("name", _iv_stacks())
+def test_I2T_array_matches_stepping(name):
+    """All voltages solved together: the currents of the stepping algorithm, from reverse bias to beyond Voc."""
+    dev = _iv_stacks()[name]
+    Voc = dev.Voc()
+    V = np.concatenate([np.linspace(-0.5, Voc, 14), Voc + np.array([0.02, 0.1])])
+    current = dev.I2T(V)
+    assert current.shape == V.shape and np.all(np.isfinite(current))
+    assert np.all(np.diff(current) >= 0.0), "the current rises with the voltage"
+    stepped = np.array([dev._I2T_stepping(v) for v in V])
+    with _Solver("legacy"):
+        np.testing.assert_array_equal(dev.I2T(V), stepped)  # the legacy setting is the stepping algorithm
+    # the stepping stops within 1e-6 of the limiting current of the root
+    np.testing.assert_allclose(current, stepped, rtol=0, atol=2e-6 * dev.Imaxrev())
+
+
+def test_I2T_scalar_and_array_points_are_the_same_solve():
+    dev = _iv_stacks()["bottom_limited_LC"]
+    V = np.linspace(-0.3, dev.Voc() + 0.05, 7)
+    current = dev.I2T(V)
+    for voltage, expected in zip(V, current):
+        scalar = dev.I2T(float(voltage))
+        assert isinstance(scalar, float)
+        assert scalar == pytest.approx(expected, rel=1e-11, abs=1e-16)
+    assert dev.I2T(V.reshape(7, 1)).shape == (7, 1)
+    assert dev.I2T(dev.Voc()) == 0.0
+
+
+def test_I2T_roundtrip_where_the_curve_is_not_vertical():
+    dev = _iv_stacks()["shunted_Rs2T"]
+    V = np.linspace(-0.5, dev.Voc() + 0.1, 25)
+    np.testing.assert_allclose(dev.V2T(dev.I2T(V)), V, rtol=0, atol=1e-8)
+
+
+def test_I2T_saturated_branch_returns_limiting_current():
+    """Unshunted limiting junction: below its saturation the IV curve is vertical."""
+    dev = _iv_stacks()["top_limited"]
+    limiting = float(dev.j[0].Jext + dev.j[0].J0.sum())
+    np.testing.assert_allclose(dev.I2T(np.array([-1.0, 0.0, 0.3])), -limiting, rtol=1e-11)
+    assert dev.Isc() == pytest.approx(limiting, rel=1e-11)
+
+
+def test_I2T_voltage_out_of_range_is_nan():
+    dev = Multi2T()  # no series resistance: two junctions cannot carry 50 V
+    current = dev.I2T(np.array([1.0, 50.0]))
+    assert np.isfinite(current[0]) and np.isnan(current[1])
+    assert np.isnan(dev.I2T(50.0))
+    # a voltage without solution must not leave the device in an undefined state
+    assert np.all(np.isfinite(dev.Vmid)) and all(np.isfinite(junc.JLC) for junc in dev.j)
+
+
+def test_I2T_leaves_junction_voltages_at_the_last_point():
+    dev = _iv_stacks()["shunted_Rs2T"]
+    V = np.array([0.4, 1.3])
+    current = dev.I2T(V)
+    np.testing.assert_allclose(dev.Vmid.sum() + dev.Rs2T * current[-1] / dev.totalarea, V[-1], rtol=0, atol=1e-8)
+
+
+def test_V2T_many_points_match_few_points():
+    """Both sides of SCALAR_SOLVE_CUTOFF give the same curve."""
+    dev = _iv_stacks()["bottom_limited_LC"]
+    current = np.linspace(-0.0119, 0.02, 150)
+    many = dev.V2T(current)
+    few = np.concatenate([dev.V2T(current[:75]), dev.V2T(current[75:])])
+    np.testing.assert_allclose(many, few, rtol=0, atol=1e-11)
+    with _Solver("legacy"):
+        np.testing.assert_allclose(many, dev.V2T(current), rtol=0, atol=1e-10)
+
+
+def test_V2T_in_breakdown_with_an_overflowing_derivative():
+    """JFG breakdown with a small mrb: the derivative overflows inside the bracket of the junction solve.
+
+    Regression: a zero Newton step from the infinite derivative counted as
+    converged, and V2T was off by up to 8.56 V at I = -0.0125 A.
+    """
+    dev = Multi2T(Eg_list=[1.8, 1.4])
+    for junc in dev.j:
+        junc.set(RBB="JFG", Gsh=1e-4)
+        junc.set(mrb=0.5)
+    dev.j[0].set(Jext=0.010)
+    dev.j[1].set(Jext=0.014)
+    current = np.linspace(-0.0125, -0.0095, 11)
+    fast = dev.V2T(current)
+    with _Solver("legacy"):
+        legacy = dev.V2T(current)
+    np.testing.assert_allclose(fast, legacy, rtol=0, atol=1e-9)
+
+
+def test_I2T_negative_photocurrent_on_an_unshunted_junction():
+    """Without a shunt a junction with Jph < 0 carries no current below -totalarea * Jph.
+
+    Regression: V2T had no solution between 0 and that current, the forward
+    bracket closed on 0, and every voltage gave nan.
+    """
+    dev = Multi2T(Eg_list=[1.8, 1.4])
+    dev.j[0].set(Jext=-0.0005)
+    dev.j[1].set(Jext=0.014)
+    V = np.array([2.0, 2.4])
+    current = dev.I2T(V)
+    assert np.all(np.isfinite(current))
+    np.testing.assert_allclose(dev.V2T(current), V, rtol=0, atol=1e-9)
+    # roots by bisection on the finite branch, current > 0.0005 A
+    np.testing.assert_allclose(current, [0.000500950033841535, 0.0029084425271042706], rtol=1e-9)
+    assert dev.I2T(2.0) == current[0]
+    # below about 1.17 V the curve is vertical at the floor 0.0005 A (within totalarea * sum(J0) below
+    # it, or 1e-13 A above it): the current is the floor, as on the saturated reverse branch
+    vertical = dev.I2T(np.array([-9.0, 1.0, 1.1]))
+    np.testing.assert_allclose(vertical, 0.0005, rtol=1e-9)
+    np.testing.assert_allclose(vertical[1], 0.0004999999999962281, rtol=1e-9)
+
+
+def test_I2T_negative_photocurrent_on_a_shunted_junction():
+    """With a shunt the junction with Jph < 0 carries current below -totalarea * Jph: the root can lie between 0 and that floor.
+
+    Regression: the forward bracket started at the floor without checking that
+    the root lies above it, and these points were nan.
+    """
+    dev = Multi2T(Eg_list=[1.8, 1.4])
+    dev.j[0].set(Jext=-0.0005, Gsh=1e-3)
+    dev.j[1].set(Jext=0.014, Gsh=1e-3)
+    current = dev.I2T(0.8)
+    np.testing.assert_allclose(current, 0.00026458049688785046, rtol=1e-9)  # root by bisection
+    assert dev.V2T(current) == pytest.approx(0.8, abs=1e-9)
+    # Voc < 0: the short-circuit current is a forward current below the floor of 0.005 A
+    rows = dev.MPP_rows([25.0], [[1.8, 1.4]], 0.0, [[-0.005, 0.014]])
+    np.testing.assert_allclose(rows["Isc"], 0.003955882274302504, rtol=1e-9)
+    dev.j[0].set(Jext=-0.005)
+    np.testing.assert_allclose(dev.MPP()["Isc"], 0.003955882274302504, rtol=1e-9)
+
+
+def test_MPP_negative_photocurrent_on_an_unshunted_junction():
+    """Isc is the floor of the vertical branch, but no point of the scan [-Isc, 0] has a finite power.
+
+    Regression: np.argmax of the all-nan power is 0, and MPP reported Imp = Isc.
+    """
+    dev = Multi2T()
+    dev.j[0].set(Jext=-0.002)
+    dev.j[1].set(Jext=0.025433)
+    mpp = dev.MPP()
+    assert mpp["Isc"] == abs(dev.I2T(0.0))  # the floor, 0.002 A
+    for key in ("Vmp", "Imp", "Pmp", "FF"):
+        assert np.isnan(mpp[key]), key
+    np.testing.assert_array_equal(dev.Ipoints, [-mpp["Isc"], np.nan, 0.0])
+
+
+@pytest.mark.parametrize("name", _iv_stacks())
+def test_MPP_matches_legacy_solver(name):
+    dev = _iv_stacks()[name]
+    fast = dev.MPP()
+    with _Solver("legacy"):
+        legacy = dev.MPP()
+        assert legacy["Isc"] == abs(dev._I2T_stepping(0.0))
+    for key in ("Voc", "Isc", "Vmp", "Imp", "Pmp", "FF"):
+        assert fast[key] == pytest.approx(legacy[key], rel=1e-6), key
+
+
 def plot_2T():
 
     dev2T = Multi2T()

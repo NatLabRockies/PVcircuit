@@ -42,6 +42,33 @@ MAXITER = 1000
 SCALAR_SOLVE_CUTOFF = 100
 # Voltage tolerance for scalar Brent solves and 3T Brent fallbacks.
 XTOL_SOLVE = 1e-11
+# Newton junction solves (_vjunction_rows, _vjunction_scalar): voltage
+# tolerance, and the number of Newton steps after which a point is finished by
+# bisection alone.
+XTOL_ROWS = 1e-13
+NEWTON_ROWS = 50
+
+# Relative tolerance of the final refinement in _maximize_rows. The power
+# maximum is flat, so the power is accurate to about the square of this.
+XRTOL_MPP = 3e-6
+
+# Solver behind every junction solve and the device methods built on them.
+#   "fast"   - safeguarded Newton (plain floats for a few points, arrays for
+#              many), root finding in Multi2T.I2T, all timesteps at once in
+#              EY.Meteo.run_ey
+#   "legacy" - the Brent root finders, the stepping Multi2T.I2T and the
+#              timestep-by-timestep run_ey used before
+# Change it at run time: pvcircuit.junction.SOLVER = "legacy"
+SOLVER = "fast"
+SOLVERS = ("fast", "legacy")
+
+
+def _legacy_solver() -> bool:
+    """True if SOLVER selects the legacy algorithms; an unknown setting raises."""
+    if SOLVER not in SOLVERS:
+        raise ValueError(f"pvcircuit.junction.SOLVER must be one of {SOLVERS}, not {SOLVER!r}")
+    return SOLVER == "legacy"
+
 
 # repository root (parent of the pvcircuit package directory); pvc_output is created here
 GITpath = os.path.dirname(os.path.dirname(__file__))
@@ -186,6 +213,9 @@ def _scaled_expm1(coefficient, exponent):
     )
     with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
         direct = coefficient * np.expm1(exponent)
+        if np.isfinite(direct).all():
+            # the log-domain form below is only ever selected where direct is not finite
+            return np.asarray(direct)
         stable = np.sign(coefficient) * np.exp(np.log(np.abs(coefficient)) + exponent)
         stable = np.where(coefficient == 0.0, 0.0, stable)
         use_stable = (exponent > 0.0) & ~np.isfinite(direct) & np.isfinite(stable)
@@ -200,6 +230,9 @@ def _scaled_exp(coefficient, exponent):
     )
     with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
         direct = coefficient * np.exp(exponent)
+        if (np.isfinite(direct) & (direct != 0.0)).all():
+            # the log-domain form below is only selected where direct is zero or not finite
+            return np.asarray(direct)
         stable = np.sign(coefficient) * np.exp(np.log(np.abs(coefficient)) + exponent)
         stable = np.where(coefficient == 0.0, 0.0, stable)
         use_stable = ((direct == 0.0) & (stable != 0.0)) | (~np.isfinite(direct) & np.isfinite(stable))
@@ -227,18 +260,23 @@ def _scaled_expm1_scalar(coefficient, exponent):
 # ----------------------------------------------------------------------
 
 
-def _recomb_current(V, st):
+def _recomb_current(V, st, plus_J0=False):
     """[A/cm^2] vectorized total recombination + shunt + RBB current density.
 
     Equivalent to Junction.Jmultidiodes(V) + Junction.JshuntRBB(V), evaluated
     from the parameter snapshot ``st`` (see Junction._solver_state). ``V`` is
-    the junction-frame diode voltage; scalar or ndarray.
+    the junction-frame diode voltage; scalar or ndarray. With a per-row
+    state (Junction._solver_state_rows) ``V`` holds one voltage per row.
+
+    ``plus_J0=True`` returns the same current plus sum(J0): the diode terms
+    are then J0 * exp(V / nVth) instead of J0 * expm1(V / nVth), without the
+    cancellation that adding sum(J0) afterwards suffers in reverse bias.
     """
     V = np.asarray(V, dtype=np.float64)
     with np.errstate(over="ignore", invalid="ignore"):
         if st["J0"].size:
-            exponent = V[..., None] / (st["n"] * st["Vth"])
-            Jled = np.sum(_scaled_expm1(st["J0"], exponent), axis=-1)
+            exponent = V[..., None] / st["nVth"]
+            Jled = np.sum(_scaled_exp(st["J0"], exponent) if plus_J0 else _scaled_expm1(st["J0"], exponent), axis=-1)
         else:
             Jled = np.zeros_like(V)
         out = Jled + V * st["Gsh"]
@@ -272,7 +310,7 @@ def _recomb_current_deriv(V, st):
     V = np.asarray(V, dtype=np.float64)
     with np.errstate(over="ignore", invalid="ignore"):
         if st["J0"].size:
-            denominator = st["n"] * st["Vth"]
+            denominator = st["nVth"]
             g = np.sum(_scaled_exp(st["J0"] / denominator, V[..., None] / denominator), axis=-1)
         else:
             g = np.zeros_like(V)
@@ -329,6 +367,129 @@ def _recomb_current_scalar(V, st):
     return out
 
 
+def _exp_scalar(x):
+    """math.exp that returns inf instead of raising on overflow."""
+    try:
+        return math.exp(x)
+    except OverflowError:
+        return math.inf
+
+
+def _recomb_newton_scalar(V, st):
+    """Plain-float (S, g) for the scalar Newton solve of a single-condition state.
+
+    S = J(V) + sum(J0) [A/cm^2] and g = dJ/dV [A/cm^2/V], the same terms as
+    _recomb_current(V, st, plus_J0=True) and _recomb_current_deriv(V, st).
+    (nan, nan) where the Bishop breakdown term is undefined.
+    """
+    Gsh = st["Gsh"]
+    S = V * Gsh
+    g = Gsh
+    for J0f, binv in zip(st["J0f"], st["ninv"]):
+        if J0f != 0.0:
+            e = J0f * _exp_scalar(V * binv)
+            S += e
+            g += e * binv
+
+    method = st["rbb"].get("method")
+    if method == "JFG":
+        mrb = st["rbb"]["mrb"]
+        if V <= st["rbb"]["Vrb"] and mrb != 0.0:
+            K = st["rbb"]["J0rb_effective"]
+            if K != 0.0:
+                binv = 1.0 / (st["Vth"] * mrb)
+                S += _scaled_expm1_scalar(-K, -V * binv)
+                coefficient = K * binv
+                term = coefficient * _exp_scalar(-V * binv)
+                if not math.isfinite(term) and coefficient > 0.0:
+                    # the exponential alone overflows before the product: log domain, like S
+                    term = _exp_scalar(math.log(coefficient) - V * binv)
+                g += term
+    elif method == "bishop":
+        Vrb = st["rbb"]["Vrb"]
+        if V <= 0.0 and Vrb != 0.0:
+            base = 1.0 + V / Vrb
+            if base <= 0.0:
+                return math.nan, math.nan
+            mrb = st["rbb"]["mrb"]
+            shunt = Gsh * st["rbb"]["avalanche"] * base ** (-mrb)
+            S += V * shunt
+            g += shunt - V * shunt * mrb / (base * Vrb)
+    elif method == "pvmismatch":
+        raise NotImplementedError("RBB method 'pvmismatch' is documented but not implemented. Use RBB='JFG', RBB='bishop', or RBB=None.")
+    return S, g
+
+
+def _vjunction_scalar(Jtot, st, Gx=0.0, Vref=0.0):
+    """Plain-float twin of _vjunction_rows for one point of a single-condition state.
+
+    Solves J(V) + Gx * (V - Vref) = Jtot with the same safeguarded Newton
+    iteration; for a handful of points this is faster than array operations.
+    Returns nan where [-VLIM_REVERSE, VLIM_FORWARD] holds no root.
+    """
+    if not (math.isfinite(Jtot) and math.isfinite(Vref)):
+        return math.nan
+    lo = -VLIM_REVERSE
+    hi = VLIM_FORWARD
+    Tj = Jtot + st["J0sum"]
+    if not (_recomb_newton_scalar(lo, st)[0] - Tj) + Gx * (lo - Vref) <= 0.0:
+        return math.nan
+    if not (_recomb_newton_scalar(hi, st)[0] - Tj) + Gx * (hi - Vref) >= 0.0:
+        return math.nan
+
+    # start value, as in _vjunction_rows
+    Jeff = Jtot + Gx * Vref
+    Geff = st["Gsh"] + Gx
+    V = math.inf
+    for J0f, binv in zip(st["J0f"], st["ninv"]):
+        if J0f > 0.0:
+            x = Jeff / J0f
+            if x <= -1.0:
+                V = math.nan
+                break
+            Vdiode = math.log1p(x) / binv
+            if Vdiode < V:
+                V = Vdiode
+    if Geff > 0.0:
+        Vlinear = Jeff / Geff
+        if Jeff <= 0.0 or Vlinear < V:
+            V = Vlinear
+    V = min(max(V, lo), hi) if math.isfinite(V) else 0.0
+
+    Tt = Tj + Gx * Vref
+    for iteration in range(MAXITER):
+        S, g = _recomb_newton_scalar(V, st)
+        f = (S - Tj) + Gx * (V - Vref)
+        if f > 0.0:
+            hi = V
+        elif f < 0.0:
+            lo = V
+        elif f == 0.0:
+            return V
+        else:  # undefined residual
+            return math.nan
+        gt = g + Gx
+        Vn = math.nan
+        if gt != 0.0 and math.isfinite(gt):  # an infinite derivative gives a zero step: bisect
+            step = f / gt
+            St = S + Gx * V
+            if St > 0.0 and Tt > 0.0:
+                ratio = St / Tt
+                if ratio > 0.0:
+                    logstep = math.log(ratio) * (St / gt)
+                    if math.isfinite(logstep):
+                        step = logstep
+            Vn = V - step
+            if abs(step) <= XTOL_ROWS:
+                return Vn
+        if not (lo <= Vn <= hi) or iteration >= NEWTON_ROWS:
+            Vn = 0.5 * (lo + hi)
+        if hi - lo <= XTOL_ROWS:
+            return Vn
+        V = Vn
+    return V
+
+
 def _jem_arr(Vmid, Jphoto, st):
     """[A/cm^2] vectorized Junction.Jem: PL (gamma*Jphoto) + EL for Vmid > 0."""
     Vmid = np.asarray(Vmid, dtype=np.float64)
@@ -342,6 +503,222 @@ def _jem_deriv(Vmid, st):
     Vmid = np.asarray(Vmid, dtype=np.float64)
     with np.errstate(over="ignore", invalid="ignore"):
         return np.where(Vmid > 0.0, _scaled_exp(st["Jdb"] / st["Vth"], Vmid / st["Vth"]), 0.0)
+
+
+# ----------------------------------------------------------------------
+# Per-row solver core (many operating conditions at once)
+# ----------------------------------------------------------------------
+
+
+def _jdb_rows(TC, Eg, sigma, theta=2.0):
+    """[A/cm^2] Jdb for row arrays of (TC, Eg, sigma): the vectorized twin of Jdb.
+
+    The closed forms (sigma == 0, or theta == 2) are evaluated for all rows
+    at once. Generalized-Urbach rows (theta != 2 with sigma != 0) call the
+    scalar Jdb row by row because of its numerical integral.
+    """
+    TC, Eg, sigma = (np.array(a, dtype=np.float64) for a in np.broadcast_arrays(TC, Eg, sigma))
+    Vthlocal = Vth(TC)
+    TKlocal = TK(TC)
+    EgkT = Eg / Vthlocal
+    sq_bracket = EgkT * EgkT + 2.0 * EgkT + 2.0
+    out = DB_PREFIX * TKlocal**3.0 * sq_bracket * np.exp(-EgkT)
+    tail = sigma != 0.0
+    if tail.any():
+        if theta == 2.0:
+            s, v = sigma[tail], Vthlocal[tail]
+            out[tail] = DB_PREFIX * TKlocal[tail] ** 3.0 * (sq_bracket[tail] - 2 * s**2 * Eg[tail] / v**3 - s**2 / v**2 + s**4 / v**4) * np.exp(-EgkT[tail] + s**2 / (2 * v**2))
+        else:
+            out[tail] = [Jdb(float(t), float(e), float(s), theta=float(theta)) for t, e, s in zip(TC[tail], Eg[tail], sigma[tail])]
+    return out
+
+
+def _state_take(st, idx):
+    """Per-point copy of a per-row solver state: point k uses row idx[k] of ``st``.
+
+    ``idx`` is an integer index array or a boolean mask over the rows.
+    """
+    out = dict(st)
+    for key in ("nVth", "J0", "Vth", "Jdb", "notdiode"):
+        out[key] = st[key][idx]
+    if "J0rb_effective" in st["rbb"]:
+        out["rbb"] = dict(st["rbb"], J0rb_effective=st["rbb"]["J0rb_effective"][idx])
+    return out
+
+
+def _vjunction_rows(Jtot, st, Gx=0.0, Vref=0.0):
+    """Solve J(V) + Gx * (V - Vref) = Jtot for the junction voltage of every element.
+
+    J(V) is _recomb_current(V, st). ``st`` is a per-row state
+    (Junction._solver_state_rows; element k uses row k) or a single-condition
+    state (Junction._solver_state; all elements share it). Gx = 0 is the
+    current-driven junction (_vdiode_rows); Gx = 1 / Rser with Vref = Vtot and
+    Jtot = Jphoto is the voltage-driven junction behind a series resistance
+    (_vmid_rows).
+
+    Works on S(V) = J(V) + sum(J0), which stays well conditioned in reverse
+    bias where J itself saturates at -sum(J0). Safeguarded Newton inside the
+    bracket [-VLIM_REVERSE, VLIM_FORWARD]: the step is taken on the logarithm
+    of the current, which is exact for a single exponential; it falls back to
+    a plain Newton step and then to bisection of the maintained bracket.
+    Returns np.nan where the bracket holds no root, the same contract as
+    Junction._vdiode_arr.
+    """
+    Jtot = np.asarray(Jtot, dtype=np.float64)
+    npts = Jtot.size
+    per_row = st["J0"].ndim == 2
+    resistive = Gx != 0.0
+    Vref = np.broadcast_to(np.asarray(Vref, dtype=np.float64), Jtot.shape)
+    V = np.full(npts, np.nan)
+    lo = np.full(npts, -VLIM_REVERSE)
+    hi = np.full(npts, VLIM_FORWARD)
+    T = Jtot + st["J0"].sum(axis=-1)
+    with np.errstate(invalid="ignore", over="ignore"):
+        flo = _recomb_current(lo, st, plus_J0=True) - T
+        fhi = _recomb_current(hi, st, plus_J0=True) - T
+        if resistive:
+            flo = flo + Gx * (lo - Vref)
+            fhi = fhi + Gx * (hi - Vref)
+        bracketed = np.isfinite(T) & np.isfinite(Vref) & (flo <= 0.0) & (fhi >= 0.0)
+
+    # start value: the smallest single-diode voltage (an upper bound of the root
+    # for a positive current), limited by the linear branch (shunt, series
+    # resistance); the linear branch alone in reverse
+    Jeff = Jtot + Gx * Vref if resistive else Jtot
+    Geff = st["Gsh"] + Gx
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        if st["J0"].size:
+            Vdiodes = np.log1p(Jeff[:, None] / st["J0"]) * st["nVth"]
+            V0 = np.min(np.where(st["J0"] > 0.0, Vdiodes, np.inf), axis=-1)
+        else:
+            V0 = np.full(npts, np.inf)
+        if Geff > 0.0:
+            V0 = np.where(Jeff > 0.0, np.minimum(V0, Jeff / Geff), Jeff / Geff)
+    V0 = np.where(np.isfinite(V0), np.clip(V0, -VLIM_REVERSE, VLIM_FORWARD), 0.0)
+
+    act = np.flatnonzero(bracketed)
+    sta = _state_take(st, act) if per_row else st
+    Va, la, ha, Ta, Vra = V0[act], lo[act], hi[act], T[act], Vref[act]
+    for iteration in range(MAXITER):
+        if act.size == 0:
+            break
+        S = _recomb_current(Va, sta, plus_J0=True)
+        g = _recomb_current_deriv(Va, sta)
+        f = S - Ta
+        if resistive:
+            # total current through diode, shunt and series resistance against its target
+            f = f + Gx * (Va - Vra)
+            S = S + Gx * Va
+            g = g + Gx
+            Tt = Ta + Gx * Vra
+        else:
+            Tt = Ta
+        ha = np.where(f > 0.0, Va, ha)
+        la = np.where(f < 0.0, Va, la)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            logstep = np.log(S / Tt) * (S / g)
+            step = np.where((S > 0.0) & (Tt > 0.0) & np.isfinite(logstep), logstep, f / g)
+            # an overflowing derivative makes the step 0 although f is finite: that is
+            # no convergence; the nan step fails both tests below and bisects
+            step = np.where(np.isfinite(g), step, np.nan)
+        Vn = Va - step
+        # a step below the tolerance is converged even if rounding puts it on the
+        # bracket edge; after NEWTON_ROWS steps only bisection is left, which ends
+        small = np.abs(step) <= XTOL_ROWS
+        newton = (Vn >= la) & (Vn <= ha) & (iteration < NEWTON_ROWS)
+        Vn = np.where(small | newton, Vn, 0.5 * (la + ha))
+        Vn = np.where(f == 0.0, Va, Vn)
+        done = small | (f == 0.0) | (ha - la <= XTOL_ROWS)
+        V[act] = Vn
+        if done.any():
+            keep = ~done
+            act, Va, la, ha, Ta, Vra = act[keep], Vn[keep], la[keep], ha[keep], Ta[keep], Vra[keep]
+            if per_row:
+                sta = _state_take(sta, keep)
+        else:
+            Va = Vn
+    return V
+
+
+def _vdiode_rows(Jtot, st):
+    """Solve _recomb_current(V, st) = Jtot: the current-driven junction, one voltage per element.
+
+    Vectorized twin of Junction._vdiode_arr for a per-row or a single-condition
+    state; np.nan where the bracket holds no root. See _vjunction_rows.
+    """
+    return _vjunction_rows(Jtot, st)
+
+
+def _vmid_rows(Vtot, Jphoto, st, Rser):
+    """Solve Vtot - V + (Jphoto - _recomb_current(V, st)) * Rser = 0, one voltage per element.
+
+    Vectorized twin of Junction._vmid_arr for a per-row or a single-condition
+    state: the junction voltage behind the series resistance ``Rser``
+    [Ohm cm^2] at the terminal voltage ``Vtot``. np.nan where the bracket
+    holds no root. See _vjunction_rows.
+    """
+    Vtot = np.asarray(Vtot, dtype=np.float64)
+    Jphoto = np.broadcast_to(np.asarray(Jphoto, dtype=np.float64), Vtot.shape)
+    if Rser == 0.0:
+        with np.errstate(invalid="ignore"):
+            inside = (Vtot >= -VLIM_REVERSE) & (Vtot <= VLIM_FORWARD) & np.isfinite(Jphoto)
+        return np.where(inside, Vtot, np.nan)
+    return _vjunction_rows(Jphoto, st, 1.0 / Rser, Vtot)
+
+
+def _maximize_rows(power, lower, upper, index, pnts, rounds):
+    """Maximum of power(u, index) for u between ``lower`` and ``upper``, for every element at once.
+
+    ``power(u, index)`` returns the power of the elements ``index`` (integer
+    array) at the abscissae ``u``; np.nan counts as no power. This is the
+    search of Multi2T.MPP and of Tandem3T.CM / VM with all elements solved
+    together: ``rounds`` scans of ``pnts`` points, each between the neighbours
+    of the best point of the scan before. A bracketed scalar minimizer then
+    refines the best point between its last neighbours, where those searches
+    stop on their grid.
+
+    Returns (u, P, complete): location and value of the maximum (np.nan
+    without any solution), and whether every scan point before the best one
+    had a solution. Points without one beyond the maximum are expected (a
+    junction driven out of its voltage range); before it they are a solver
+    failure that may hide the maximum.
+    """
+    count = np.arange(index.size)
+    position = np.arange(pnts)[None, :]
+    lo = np.array(np.broadcast_to(np.asarray(lower, dtype=np.float64), index.shape))
+    hi = np.array(np.broadcast_to(np.asarray(upper, dtype=np.float64), index.shape))
+    best = np.full(index.size, np.nan)
+    Pbest = np.full(index.size, -np.inf)
+    complete = np.ones(index.size, dtype=bool)
+    for _ in range(rounds):
+        grid = np.linspace(lo, hi, pnts, axis=1)
+        P = power(grid.ravel(), np.repeat(index, pnts)).reshape(index.size, pnts)
+        solved = np.isfinite(P)
+        P = np.where(solved, P, -np.inf)
+        nmax = np.argmax(P, axis=1)
+        complete &= (solved | (position > nmax[:, None])).all(axis=1)
+        higher = P[count, nmax] > Pbest
+        best = np.where(higher, grid[count, nmax], best)
+        Pbest = np.where(higher, P[count, nmax], Pbest)
+        lo = grid[count, np.maximum(nmax - 1, 0)]
+        hi = grid[count, np.minimum(nmax + 1, pnts - 1)]
+
+    # refine inside the last pair of neighbours
+    xm = grid[count, nmax]
+    xl, xr = np.minimum(lo, hi), np.maximum(lo, hi)
+    inside = (nmax > 0) & (nmax < pnts - 1) & (P[count, nmax] > 0.0) & (xl < xm) & (xm < xr)
+    if inside.any():
+        i = np.flatnonzero(inside)
+
+        def negative_power(u, idx):
+            value = power(u, idx.astype(np.intp))
+            return np.where(np.isfinite(value), -value, 0.0)
+
+        res = elementwise.find_minimum(negative_power, (xl[i], xm[i], xr[i]), args=(index[i].astype(np.float64),), tolerances=dict(xatol=0.0, xrtol=XRTOL_MPP, fatol=0.0, frtol=0.0))
+        higher = -res.f_x > Pbest[i]
+        best[i] = np.where(higher, res.x, best[i])
+        Pbest[i] = np.where(higher, -res.f_x, Pbest[i])
+    return best, np.where(np.isfinite(Pbest), Pbest, np.nan), complete
 
 
 class Junction:
@@ -711,6 +1088,7 @@ class Junction:
             rbb["J0rb_effective"] = float(_saturation_current_from_ratio(Jdbf, rbb["mrb"], rbb["J0rb"]))
         return {
             "n": n[good],
+            "nVth": n[good] * Vthf,
             "J0": J0[good],
             "Vth": Vthf,
             "Gsh": float(self.Gsh),
@@ -722,6 +1100,60 @@ class Junction:
             # plain-python twins for the fast scalar residual
             "J0f": [float(x) for x in J0[good]],
             "ninv": [1.0 / (float(ni) * Vthf) for ni in n[good]],
+            "J0sum": float(J0[good].sum()),
+        }
+
+    def _solver_state_rows(self, TC, Eg, sigma) -> dict:
+        """Per-row twin of _solver_state for arrays of (TC, Eg, sigma).
+
+        Everything that depends on temperature or bandgap gets a leading row
+        axis: ``J0`` and ``nVth`` are (rows, diodes), ``Vth``, ``Jdb`` and
+        ``notdiode`` are (rows,). The state-based kernels (_recomb_current,
+        _recomb_current_deriv, _jem_arr) take this state unchanged when ``V``
+        holds one voltage per row. Diodes with n <= 0 are dropped and
+        non-finite J0 entries carry no current, as in _solver_state.
+
+        A subclass that redefines J0, Jdb or Vth is evaluated row by row
+        through its own properties, so a custom temperature model is honoured.
+        """
+        TC = np.atleast_1d(np.asarray(TC, dtype=np.float64))
+        Eg = np.broadcast_to(np.asarray(Eg, dtype=np.float64), TC.shape)
+        sigma = np.broadcast_to(np.asarray(sigma, dtype=np.float64), TC.shape)
+        n = np.atleast_1d(np.asarray(self.n, dtype=np.float64))
+        cls = type(self)
+        if cls.J0 is Junction.J0 and cls.Jdb is Junction.Jdb and cls.Vth is Junction.Vth:
+            Vthr = Vth(TC)
+            Jdbr = _jdb_rows(TC, Eg, sigma, float(self.theta))
+            ratio = np.atleast_1d(np.asarray(self.J0ratio, dtype=np.float64))
+            J0 = _saturation_current_from_ratio(Jdbr[:, None], n[None, :], ratio[None, :])
+        else:
+            tmp = self.copy()
+            Vthr = np.empty(TC.size)
+            Jdbr = np.empty(TC.size)
+            J0 = np.empty((TC.size, n.size))
+            for i in range(TC.size):
+                tmp.set(TC=TC[i], Eg=Eg[i], sigma=sigma[i])
+                Vthr[i] = tmp.Vth
+                Jdbr[i] = tmp.Jdb
+                J0[i] = tmp.J0
+        with np.errstate(invalid="ignore"):
+            notdiode = (self.pn == 0) | (J0.sum(axis=-1) == 0.0)
+        keep = n > 0.0
+        J0 = np.where(np.isfinite(J0[:, keep]), J0[:, keep], 0.0)
+        rbb = self.RBB_dict.copy()
+        if rbb.get("method") == "JFG" and rbb["mrb"] != 0.0:
+            rbb["J0rb_effective"] = _saturation_current_from_ratio(Jdbr, rbb["mrb"], rbb["J0rb"])
+        return {
+            "n": n[keep],
+            "nVth": n[keep][None, :] * Vthr[:, None],
+            "J0": J0,
+            "Vth": Vthr,
+            "Gsh": float(self.Gsh),
+            "Rser": float(self.Rser),
+            "Jdb": Jdbr,
+            "gamma": float(self.gamma),
+            "notdiode": notdiode,
+            "rbb": rbb,
         }
 
     def _vdiode_arr(self, Jtot: np.ndarray, state: dict | None = None) -> np.ndarray:
@@ -731,11 +1163,26 @@ class Junction:
         Returns the junction-frame voltages; np.nan where no root is bracketed
         in [-VLIM_REVERSE, VLIM_FORWARD] (matching the historical brentq
         ValueError -> nan behaviour).
+
+        ``state`` is the junction's own operating condition, shared by all
+        elements (_solver_state, the default), or a per-row state
+        (_solver_state_rows) with one element of ``Jtot`` per row. The solver
+        is chosen by SOLVER; a per-row state is always solved by Newton.
         """
         st = self._solver_state() if state is None else state
         Jtot = np.asarray(Jtot, dtype=np.float64)
+        if st["J0"].ndim == 2:  # per-row state: element k at the operating condition of row k
+            return np.where(st["notdiode"], 0.0, _vdiode_rows(Jtot, st))
         if st["notdiode"]:
             return np.zeros_like(Jtot)
+
+        if not _legacy_solver():
+            if Jtot.size >= SCALAR_SOLVE_CUTOFF:
+                return _vdiode_rows(Jtot.ravel(), st).reshape(Jtot.shape)
+            out = np.empty_like(Jtot)
+            for k in range(Jtot.size):
+                out.flat[k] = _vjunction_scalar(float(Jtot.flat[k]), st)
+            return out
 
         if Jtot.size < SCALAR_SOLVE_CUTOFF:
             out = np.empty_like(Jtot)
@@ -764,13 +1211,31 @@ class Junction:
         per-point luminescent coupling). ``Rser`` overrides the junction's own
         series resistance (used by Tandem3T to fold Rz in).
         Returns np.nan where no root is bracketed.
+
+        ``state`` is the junction's own operating condition or a per-row
+        state with one element of ``Vtot`` per row, as in _vdiode_arr.
         """
         st = self._solver_state() if state is None else state
         Vtot = np.asarray(Vtot, dtype=np.float64)
+        Rs = st["Rser"] if Rser is None else float(Rser)
+        if st["J0"].ndim == 2:  # per-row state: element k at the operating condition of row k
+            return np.where(st["notdiode"], 0.0, _vmid_rows(Vtot, Jphoto, st, Rs))
         if st["notdiode"]:
             return np.zeros_like(Vtot)
-        Rs = st["Rser"] if Rser is None else float(Rser)
         Jph = np.broadcast_to(np.asarray(Jphoto, dtype=np.float64), Vtot.shape)
+
+        if not _legacy_solver():
+            if Vtot.size >= SCALAR_SOLVE_CUTOFF:
+                return _vmid_rows(Vtot.ravel(), Jph.ravel(), st, Rs).reshape(Vtot.shape)
+            out = np.empty_like(Vtot)
+            for k in range(Vtot.size):
+                Vt = float(Vtot.flat[k])
+                Jp = float(Jph.flat[k])
+                if Rs == 0.0:
+                    out.flat[k] = Vt if (-VLIM_REVERSE <= Vt <= VLIM_FORWARD and math.isfinite(Jp)) else np.nan
+                else:
+                    out.flat[k] = _vjunction_scalar(Jp, st, 1.0 / Rs, Vt)
+            return out
 
         if Vtot.size < SCALAR_SOLVE_CUTOFF:
             out = np.empty_like(Vtot)

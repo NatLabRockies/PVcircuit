@@ -240,12 +240,77 @@ class Tandem3T:
         if err:
             return err
 
-        st_t = top._solver_state()
-        st_b = bot._solver_state()
-
         Ito = np.asarray(iv3T.Ito, dtype=np.float64).ravel()
         Iro = np.asarray(iv3T.Iro, dtype=np.float64).ravel()
         Izo = np.asarray(iv3T.Izo, dtype=np.float64).ravel()
+        npts = Ito.size
+
+        Vzt, Vrz, Vtr, JLC_t, JLC_b = self._V3T_core(Iro, Izo, Ito, *self._state())
+        iv3T.Vzt = Vzt.reshape(iv3T.shape)
+        iv3T.Vrz = Vrz.reshape(iv3T.shape)
+        iv3T.Vtr = Vtr.reshape(iv3T.shape)
+
+        # historical state side-effects: junction JLC left at last point's value
+        if npts:
+            top.JLC = np.float64(JLC_t[-1])
+            bot.JLC = np.float64(JLC_b[-1])
+
+        iv3T.Pcalc()  # dev2load defaults
+
+        return 0
+
+    def _state(self):
+        """Solver states and photocurrent densities at the device's own operating condition.
+
+        Returns (st_t, st_b, base_t, base_b) for _V3T_core and _I3Trel_core:
+        Junction._solver_state() of the top and bottom junction and their
+        photocurrent densities without luminescent coupling [A/cm^2].
+        """
+        top = self.top
+        bot = self.bot
+        base_t = float(top.Jext * top.lightarea / top.totalarea)
+        base_b = float(bot.Jext * bot.lightarea / bot.totalarea)
+        return top._solver_state(), bot._solver_state(), base_t, base_b
+
+    def _state_rows(self, TC, Eg, sigma, Jext):
+        """Per-row twin of _state for rows of operating conditions.
+
+        TC (rows,) [C]; Eg, sigma [eV] and Jext [A/cm^2] (rows, 2) with the
+        columns [top, bot], or anything that broadcasts to that shape.
+        Returns (nrows, st_t, st_b, base_t, base_b) with
+        Junction._solver_state_rows states and (rows,) photocurrent
+        densities. The device is not modified.
+        """
+        top = self.top
+        bot = self.bot
+        TC = np.atleast_1d(np.asarray(TC, dtype=np.float64))
+        shape = (TC.size, 2)
+
+        def per_junction(values):
+            values = np.asarray(values, dtype=np.float64)
+            return values.reshape(shape) if values.size == TC.size * 2 else np.broadcast_to(values, shape)
+
+        Eg, sigma, Jext = per_junction(Eg), per_junction(sigma), per_junction(Jext)
+        st_t = top._solver_state_rows(TC, Eg[:, 0], sigma[:, 0])
+        st_b = bot._solver_state_rows(TC, Eg[:, 1], sigma[:, 1])
+        if top.beta > 0.0 or st_t["notdiode"].any() or st_b["notdiode"].any():
+            raise NotImplementedError("the *_rows methods model neither luminescent coupling into the top junction (top.beta > 0) nor resistor-only junctions")
+        base_t = Jext[:, 0] * float(top.lightarea) / float(top.totalarea)
+        base_b = Jext[:, 1] * float(bot.lightarea) / float(bot.totalarea)
+        return TC.size, st_t, st_b, base_t, base_b
+
+    def _V3T_core(self, Iro, Izo, Ito, st_t, st_b, base_t, base_b):
+        """Device voltages for the device currents (Iro, Izo, Ito) [A], all points at once.
+
+        The states and photocurrent densities are those of _state (one
+        operating condition shared by all points) or of _state_rows (one
+        condition per point, see also junction._state_take).
+        Returns (Vzt, Vrz, Vtr, JLC_t, JLC_b): the device voltages [V], np.nan
+        where the currents violate Kirchhoff, and the luminescent coupling
+        current densities into the top and bottom junction.
+        """
+        top = self.top  # top Junction
+        bot = self.bot  # bot Junction
         npts = Ito.size
 
         # Kirchhoff filter (nan inputs also fail this test -> nan outputs)
@@ -264,25 +329,25 @@ class Tandem3T:
         scale_bt = bot.totalarea / top.totalarea if bot.totalarea < top.totalarea else 1.0
 
         # top Junction (no LC into the top on the first pass)
-        Jphoto_t = top.Jext * top.lightarea / top.totalarea + np.zeros(npts)
+        Jphoto_t = base_t + np.zeros(npts)
         ut = top._vdiode_arr(Jphoto_t + Jt * top.pn, state=st_t)  # junction-frame Vtmid
         Vt = ut * top.pn + Jt * top.Rser
 
         # bot Junction with top -> bot LC
         JLC_b = bot.beta * junction._jem_arr(ut, Jphoto_t, st_t) * scale_tb
-        Jphoto_b = bot.Jext * bot.lightarea / bot.totalarea + JLC_b
+        Jphoto_b = base_b + JLC_b
         ur = bot._vdiode_arr(Jphoto_b + Jr * bot.pn, state=st_b)
         Vr = ur * bot.pn + Jr * bot.Rser
 
         JLC_t = np.zeros(npts)
         if top.beta > 0.0:  # repeat if backwards LC
             JLC_t = top.beta * junction._jem_arr(ur, Jphoto_b, st_b) * scale_bt
-            Jphoto_t = top.Jext * top.lightarea / top.totalarea + JLC_t
+            Jphoto_t = base_t + JLC_t
             ut = top._vdiode_arr(Jphoto_t + Jt * top.pn, state=st_t)
             Vt = ut * top.pn + Jt * top.Rser
 
             JLC_b = bot.beta * junction._jem_arr(ut, Jphoto_t, st_t) * scale_tb
-            Jphoto_b = bot.Jext * bot.lightarea / bot.totalarea + JLC_b
+            Jphoto_b = base_b + JLC_b
             ur = bot._vdiode_arr(Jphoto_b + Jr * bot.pn, state=st_b)
             Vr = ur * bot.pn + Jr * bot.Rser
 
@@ -292,18 +357,7 @@ class Tandem3T:
         Vz = Jz * self.Rz
 
         nan = np.nan
-        iv3T.Vzt = np.where(valid, Vz - Vt, nan).reshape(iv3T.shape)
-        iv3T.Vrz = np.where(valid, Vr - Vz, nan).reshape(iv3T.shape)
-        iv3T.Vtr = np.where(valid, Vt - Vr, nan).reshape(iv3T.shape)
-
-        # historical state side-effects: junction JLC left at last point's value
-        if npts:
-            top.JLC = np.float64(JLC_t[-1])
-            bot.JLC = np.float64(JLC_b[-1])
-
-        iv3T.Pcalc()  # dev2load defaults
-
-        return 0
+        return np.where(valid, Vz - Vt, nan), np.where(valid, Vr - Vz, nan), np.where(valid, Vt - Vr, nan), JLC_t, JLC_b
 
     def J3Tabs(self, iv3T):
         """
@@ -549,7 +603,7 @@ class Tandem3T:
 
         return 0
 
-    def _i3t_newton(self, Vzt, Vrz, ut, ur, Vz, active0, st_t, st_b):
+    def _i3t_newton(self, Vzt, Vrz, ut, ur, Vz, active0, st_t, st_b, base_t, base_b):
         """
         Vectorized damped Newton for the 3T KCL system with analytic Jacobian.
 
@@ -563,6 +617,10 @@ class Tandem3T:
         All points iterate simultaneously; the 3x3 systems are row-scaled and
         solved with numpy.linalg.solve. Steps are clipped (SPICE-style voltage
         limiting) because the diode exponential makes undamped Newton overshoot.
+
+        ``st_t``, ``st_b``, ``base_t`` and ``base_b`` are those of _state
+        (one operating condition for all points) or of _state_rows (one per
+        point).
 
         Returns (ut, ur, Vz, converged_mask); non-converged points keep their
         last iterate and must be handled by the caller (Brent fallback).
@@ -578,8 +636,7 @@ class Tandem3T:
         Rr = float(bot.Rser)
         Rz = float(self.Rz)
         scale_tb = At / Ar if At < Ar else 1.0
-        base_t = float(top.Jext * top.lightarea / top.totalarea)
-        base_b = float(bot.Jext * bot.lightarea / bot.totalarea)
+        per_point = st_t["J0"].ndim == 2  # one operating condition per point
         VL = junction.VLIM_REVERSE
         VF = junction.VLIM_FORWARD
 
@@ -596,16 +653,21 @@ class Tandem3T:
             uta = ut[a]
             ura = ur[a]
             Vza = Vz[a]
+            if per_point:
+                sa_t, sa_b = junction._state_take(st_t, a), junction._state_take(st_b, a)
+                bt, bb = base_t[a], base_b[a]
+            else:
+                sa_t, sa_b, bt, bb = st_t, st_b, base_t, base_b
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                Dt = junction._recomb_current(uta, st_t)
-                Dtp = junction._recomb_current_deriv(uta, st_t)
-                jem = junction._jem_arr(uta, base_t, st_t)
-                jemp = junction._jem_deriv(uta, st_t)
-                Jp_t = base_t - Dt
+                Dt = junction._recomb_current(uta, sa_t)
+                Dtp = junction._recomb_current_deriv(uta, sa_t)
+                jem = junction._jem_arr(uta, bt, sa_t)
+                jemp = junction._jem_deriv(uta, sa_t)
+                Jp_t = bt - Dt
                 JLC_b = bot.beta * jem * scale_tb
-                Dr = junction._recomb_current(ura, st_b)
-                Drp = junction._recomb_current_deriv(ura, st_b)
-                Jp_r = base_b + JLC_b - Dr
+                Dr = junction._recomb_current(ura, sa_b)
+                Drp = junction._recomb_current_deriv(ura, sa_b)
+                Jp_r = bb + JLC_b - Dr
 
                 F1 = (Vza - Vzt[a]) * pn_t - uta + Jp_t * Rt
                 F2 = (Vrz[a] + Vza) * pn_r - ura + Jp_r * Rr
@@ -676,8 +738,58 @@ class Tandem3T:
         if err:
             return err
 
-        st_t = top._solver_state()
-        st_b = bot._solver_state()
+        st_t, st_b, base_t, base_b = self._state()
+        Vzt = np.asarray(iv3T.Vzt, dtype=np.float64).ravel()
+        Vrz = np.asarray(iv3T.Vrz, dtype=np.float64).ravel()
+        npts = Vzt.size
+
+        Iro, Izo, Ito, ut, solved = self._I3Trel_core(Vzt, Vrz, st_t, st_b, base_t, base_b)
+        fallback = np.isfinite(Vzt) & np.isfinite(Vrz) & ~solved
+
+        if np.any(fallback):
+            # Nested-Brent path for the stragglers only.
+            sub = IV3T(name=iv3T.name + "_fb", meastype=iv3T.meastype, shape=int(fallback.sum()), area=iv3T.area)
+            sub.Vzt[:] = Vzt[fallback]
+            sub.Vrz[:] = Vrz[fallback]
+            sub.Vtr[:] = -Vzt[fallback] - Vrz[fallback]
+            self._i3t_brent_fallback(sub)
+            Iro[fallback] = sub.Iro
+            Izo[fallback] = sub.Izo
+            Ito[fallback] = sub.Ito
+
+        iv3T.Iro = Iro.reshape(iv3T.shape)
+        iv3T.Izo = Izo.reshape(iv3T.shape)
+        iv3T.Ito = Ito.reshape(iv3T.shape)
+
+        # state side-effects analogous to V3T/J3Tabs: junction JLC left at the
+        # last point's self-consistent value (top gets none in the forward-only
+        # LC configuration this path handles)
+        if npts:
+            scale_tb = top.totalarea / bot.totalarea if top.totalarea < bot.totalarea else 1.0
+            top.JLC = np.float64(0.0)
+            bot.JLC = np.float64(bot.beta * junction._jem_arr(ut[-1:], base_t, st_t)[0] * scale_tb)
+
+        iv3T.kirchhoff(["Vzt", "Vrz"])  # Vtr not used so make sure consistent
+        iv3T.kirchhoff(iv3T.Idevlist.copy())  # check for bad results
+        iv3T.Pcalc()  # dev2load defaults
+
+        return 0
+
+    def _I3Trel_core(self, Vzt, Vrz, st_t, st_b, base_t, base_b):
+        """Device currents for the relative device voltages (Vzt, Vrz) [V], all points at once.
+
+        The vectorized part of I3Trel: seed plus damped Newton, without the
+        point-by-point Brent fallback. The states and photocurrent densities
+        are those of _state (one operating condition shared by all points) or
+        of _state_rows (one condition per point). Backward luminescent
+        coupling and resistor-only junctions are not modelled here.
+
+        Returns (Iro, Izo, Ito, ut, solved): the device currents [A], np.nan
+        where ``solved`` is False (no verified solution), and the top junction
+        voltage.
+        """
+        top = self.top
+        bot = self.bot
         pn_t = float(top.pn)
         pn_r = float(bot.pn)
         At = float(top.totalarea)
@@ -687,11 +799,6 @@ class Tandem3T:
         Rr = float(bot.Rser)
         Rz = float(self.Rz)
         scale_tb = At / Ar if At < Ar else 1.0
-        base_t = float(top.Jext * top.lightarea / top.totalarea)
-        base_b = float(bot.Jext * bot.lightarea / bot.totalarea)
-
-        Vzt = np.asarray(iv3T.Vzt, dtype=np.float64).ravel()
-        Vrz = np.asarray(iv3T.Vrz, dtype=np.float64).ravel()
         npts = Vzt.size
         finite_in = np.isfinite(Vzt) & np.isfinite(Vrz)
 
@@ -718,11 +825,11 @@ class Tandem3T:
             Iro[seeded] = (Jr * Ar)[seeded]
             Izo[seeded] = (Jz * Az)[seeded]
             Ito[seeded] = (Jt * At)[seeded]
-            fallback = finite_in & ~seeded
+            solved = seeded
         else:
             with np.errstate(invalid="ignore"):
                 Vz0 = np.clip(np.nan_to_num(Jz * Rz, nan=0.0), -20.0, 20.0)
-            ut, ur, Vz, conv = self._i3t_newton(Vzt, Vrz, ut, ur, Vz0, seeded, st_t, st_b)
+            ut, ur, Vz, conv = self._i3t_newton(Vzt, Vrz, ut, ur, Vz0, seeded, st_t, st_b, base_t, base_b)
 
             # verify the converged points against the residuals
             with np.errstate(over="ignore", invalid="ignore"):
@@ -740,35 +847,200 @@ class Tandem3T:
             Iro[good] = Iro_n[good]
             Izo[good] = Izo_n[good]
             Ito[good] = Ito_n[good]
-            fallback = finite_in & ~good
+            solved = good
 
-        if np.any(fallback):
-            # Nested-Brent path for the stragglers only.
-            sub = IV3T(name=iv3T.name + "_fb", meastype=iv3T.meastype, shape=int(fallback.sum()), area=iv3T.area)
-            sub.Vzt[:] = Vzt[fallback]
-            sub.Vrz[:] = Vrz[fallback]
-            sub.Vtr[:] = -Vzt[fallback] - Vrz[fallback]
-            self._i3t_brent_fallback(sub)
-            Iro[fallback] = sub.Iro
-            Izo[fallback] = sub.Izo
-            Ito[fallback] = sub.Ito
+        return Iro, Izo, Ito, ut, solved
 
+    # ------------------------------------------------------------------
+    # many operating conditions at once: one point per row of (TC, Eg, sigma, Jext)
+    # ------------------------------------------------------------------
+
+    def _iv3T_rows(self, name, Iro, Izo, Ito, Vzt, Vrz, Vtr, meastype="CZ"):
+        """IV3T with one point per row from device currents and voltages."""
+        iv3T = IV3T(name=name, meastype=meastype, shape=Iro.size, area=self.lightarea)
+        iv3T.Iro, iv3T.Izo, iv3T.Ito = Iro, Izo, Ito
+        iv3T.Vzt, iv3T.Vrz, iv3T.Vtr = Vzt, Vrz, Vtr
+        iv3T.Pcalc()  # dev2load defaults
+        return iv3T
+
+    def V3T_rows(self, iv3T, TC, Eg, sigma, Jext):
+        """
+        V3T for many operating conditions at once.
+
+        Point k of ``iv3T`` is evaluated at the operating condition of row k
+        of (TC, Eg, sigma, Jext), e.g. one timestep of an energy-yield run:
+        TC (rows,) [C]; Eg, sigma [eV] and Jext [A/cm^2] (rows, 2) with the
+        columns [top, bot]. Everything that does not vary by row (n, J0ratio,
+        Gsh, Rser, RBB, beta, gamma, areas, pn, Rz) comes from this device,
+        which is not modified.
+
+        calcuate iv3T.(Vzt,Vrz,Vtr) from iv3T.(Iro,Izo,Ito), as V3T does
+        """
+        inlist = iv3T.Idevlist.copy()
+        outlist = iv3T.Vdevlist.copy()
+        err = iv3T.init(inlist, outlist)  # initialize output
+        if err:
+            return err
+
+        nrows, st_t, st_b, base_t, base_b = self._state_rows(TC, Eg, sigma, Jext)
+        Ito = np.asarray(iv3T.Ito, dtype=np.float64).ravel()
+        Iro = np.asarray(iv3T.Iro, dtype=np.float64).ravel()
+        Izo = np.asarray(iv3T.Izo, dtype=np.float64).ravel()
+        if Ito.size != nrows:
+            raise ValueError(f"V3T_rows: iv3T has {Ito.size} points but there are {nrows} rows of operating conditions")
+
+        Vzt, Vrz, Vtr, _, _ = self._V3T_core(Iro, Izo, Ito, st_t, st_b, base_t, base_b)
+        iv3T.Vzt = Vzt.reshape(iv3T.shape)
+        iv3T.Vrz = Vrz.reshape(iv3T.shape)
+        iv3T.Vtr = Vtr.reshape(iv3T.shape)
+        iv3T.Pcalc()  # dev2load defaults
+
+        return 0
+
+    def I3Trel_rows(self, iv3T, TC, Eg, sigma, Jext):
+        """
+        I3Trel for many operating conditions at once; see V3T_rows for the rows.
+
+        calcuate iv3T.(Iro,Izo,Ito) from RELATIVE iv3T.(Vzt,Vrz,Vtr) ignoring Vtr,
+        as I3Trel does, but without its point-by-point Brent fallback: a point
+        the Newton iteration does not solve is left at np.nan.
+        """
+        inlist = iv3T.Vdevlist.copy()  # ['Vzt','Vrz','Vtr']
+        outlist = iv3T.Idevlist.copy()
+        err = iv3T.init(inlist, outlist)  # initialize output
+        if err:
+            return err
+
+        nrows, st_t, st_b, base_t, base_b = self._state_rows(TC, Eg, sigma, Jext)
+        Vzt = np.asarray(iv3T.Vzt, dtype=np.float64).ravel()
+        Vrz = np.asarray(iv3T.Vrz, dtype=np.float64).ravel()
+        if Vzt.size != nrows:
+            raise ValueError(f"I3Trel_rows: iv3T has {Vzt.size} points but there are {nrows} rows of operating conditions")
+
+        Iro, Izo, Ito, _, _ = self._I3Trel_core(Vzt, Vrz, st_t, st_b, base_t, base_b)
         iv3T.Iro = Iro.reshape(iv3T.shape)
         iv3T.Izo = Izo.reshape(iv3T.shape)
         iv3T.Ito = Ito.reshape(iv3T.shape)
 
-        # state side-effects analogous to V3T/J3Tabs: junction JLC left at the
-        # last point's self-consistent value (top gets none in the forward-only
-        # LC configuration this path handles)
-        if npts:
-            top.JLC = np.float64(0.0)
-            bot.JLC = np.float64(bot.beta * junction._jem_arr(ut[-1:], base_t, st_t)[0] * scale_tb)
-
         iv3T.kirchhoff(["Vzt", "Vrz"])  # Vtr not used so make sure consistent
-        iv3T.kirchhoff(iv3T.Idevlist.copy())  # check for bad results
         iv3T.Pcalc()  # dev2load defaults
 
         return 0
+
+    def Voc3_rows(self, TC, Eg, sigma, Jext, meastype="CZ"):
+        """
+        Voc3 for many operating conditions at once; see V3T_rows for the rows.
+
+        Returns an IV3T with one point per row: (Vzt, Vrz, Vtr) of
+        (Iro = 0, Izo = 0, Ito = 0).
+        """
+        nrows, st_t, st_b, base_t, base_b = self._state_rows(TC, Eg, sigma, Jext)
+        zero = np.zeros(nrows)
+        Vzt, Vrz, Vtr, _, _ = self._V3T_core(zero, zero, zero, st_t, st_b, base_t, base_b)
+        return self._iv3T_rows("Voc3", zero.copy(), zero.copy(), zero.copy(), Vzt, Vrz, Vtr, meastype)
+
+    def Isc3_rows(self, TC, Eg, sigma, Jext, meastype="CZ"):
+        """
+        Isc3 for many operating conditions at once; see V3T_rows for the rows.
+
+        Returns an IV3T with one point per row: (Iro, Izo, Ito) of
+        (Vzt = 0, Vrz = 0, Vtr = 0); np.nan where the Newton iteration found
+        no solution.
+        """
+        nrows, st_t, st_b, base_t, base_b = self._state_rows(TC, Eg, sigma, Jext)
+        zero = np.zeros(nrows)
+        Iro, Izo, Ito, _, _ = self._I3Trel_core(zero, zero, st_t, st_b, base_t, base_b)
+        return self._iv3T_rows("Isc3", Iro, Izo, Ito, zero.copy(), zero.copy(), zero.copy(), meastype)
+
+    def MPP_rows(self, TC, Eg, sigma, Jext, pnts=11):
+        """
+        MPP for many operating conditions at once; see V3T_rows for the rows.
+
+        The maximum of the total power over both terminal currents (two
+        independent loads; with Rz = 0 that is four-terminal operation). The
+        currents are optimized in turn, as MPP does, until the power stops
+        changing; each turn scans the whole range of its current and refines
+        the maximum to the optimum, where MPP stops on a grid between the
+        short-circuit current and half of it.
+
+        Returns an IV3T with one point per row; np.nan where a row has no
+        solution.
+        """
+        top = self.top
+        bot = self.bot
+        nrows, st_t, st_b, base_t, base_b = self._state_rows(TC, Eg, sigma, Jext)
+        rows = np.arange(nrows)
+        It = -float(top.pn) * float(top.totalarea)  # [A] per extracted current density of the top junction
+        Ir = -float(bot.pn) * float(bot.totalarea)
+
+        def solve(x, y, index):
+            # point k: current densities x (top) and y (bottom) [A/cm^2] extracted at the condition of row index[k]
+            Ito = x * It
+            Iro = y * Ir
+            Izo = -(Ito + Iro)
+            Vzt, Vrz, Vtr, _, JLC_b = self._V3T_core(Iro, Izo, Ito, junction._state_take(st_t, index), junction._state_take(st_b, index), base_t[index], base_b[index])
+            return -Iro * Vrz + Ito * Vzt, Iro, Izo, Ito, Vzt, Vrz, Vtr, JLC_b
+
+        x = np.zeros(nrows)
+        y = np.zeros(nrows)
+        P = np.full(nrows, -np.inf)
+        active = rows
+        # strongly top-rich rows zig-zag along the ridge of luminescent coupling for
+        # about 40 turns; converged rows leave ``active`` after a few
+        for _ in range(40):
+            if active.size == 0:
+                break
+            # top junction with the bottom current held, then the reverse; the
+            # bottom junction can extract its photocurrent plus the coupling
+            # current that belongs to the top operating point
+            x[active] = junction._maximize_rows(lambda u, idx: solve(u, y[idx], idx)[0], 0.0, np.maximum(base_t[active], 0.0), active, pnts, 3)[0]
+            upper = base_b[active] + solve(x[active], np.zeros(active.size), active)[7]
+            y[active], Pnew, _ = junction._maximize_rows(lambda u, idx: solve(x[idx], u, idx)[0], 0.0, np.maximum(upper, 0.0), active, pnts, 3)
+            with np.errstate(invalid="ignore"):
+                changed = ~(np.abs(Pnew - P[active]) <= 1e-9 * np.abs(Pnew))
+            P[active] = Pnew
+            active = active[changed]
+
+        _, Iro, Izo, Ito, Vzt, Vrz, Vtr, _ = solve(x, y, rows)
+        return self._iv3T_rows("MPP", Iro, Izo, Ito, Vzt, Vrz, Vtr)
+
+    def VM_rows(self, bot, top, TC, Eg, sigma, Jext, pnts=11):
+        """
+        VM for many operating conditions at once; see V3T_rows for the rows.
+
+        The maximum power point on the voltage-matched line of ``bot`` bottom
+        cells against ``top`` top cells: the search of VM for every row (four
+        ``pnts``-point scans along the line), followed by a refinement to the
+        optimum, where VM stops on its grid.
+
+        Returns an IV3T with one point per row; np.nan where a row has no
+        solution: the Newton iteration of I3Trel failed on its line and the
+        row needs VM with its point-by-point fallback.
+        """
+        if bot == 0 or top == 0:
+            raise ValueError("VM_rows needs bot > 0 and top > 0")
+        nrows, st_t, st_b, base_t, base_b = self._state_rows(TC, Eg, sigma, Jext)
+        rows = np.arange(nrows)
+        zero = np.zeros(nrows)
+        Voc_zt, Voc_rz, _, _, _ = self._V3T_core(zero, zero, zero, st_t, st_b, base_t, base_b)  # triple Voc point
+
+        # the line of VM: the voltage of the junction that reaches its Voc last is scanned
+        sign = -float(self.top.pn * self.bot.pn)
+        with np.errstate(invalid="ignore"):
+            scan_top = np.abs(Voc_zt) * top > np.abs(Voc_rz) * bot
+
+        def solve(x, index):
+            # point k: scanned voltage x at the operating condition of row index[k]
+            Vzt = np.where(scan_top[index], x, x * bot / top * sign)
+            Vrz = np.where(scan_top[index], x * top / bot * sign, x)
+            Iro, Izo, Ito, _, _ = self._I3Trel_core(Vzt, Vrz, junction._state_take(st_t, index), junction._state_take(st_b, index), base_t[index], base_b[index])
+            return -Iro * Vrz + Ito * Vzt, Iro, Izo, Ito, Vzt, Vrz
+
+        x, _, complete = junction._maximize_rows(lambda u, idx: solve(u, idx)[0], 0.0, np.where(scan_top, Voc_zt, Voc_rz), rows, pnts, 4)
+        _, Iro, Izo, Ito, Vzt, Vrz = solve(x, rows)
+        # an unsolved point before the maximum may have hidden it
+        Iro = np.where(complete, Iro, np.nan)
+        return self._iv3T_rows("VM" + str(bot) + str(top), Iro, Izo, Ito, Vzt, Vrz, -Vzt - Vrz)
 
     def Voc3(self, meastype="CZ"):
         """
@@ -810,7 +1082,10 @@ class Tandem3T:
         Voc3 = self.Voc3(meastype)  # find triple Voc point
         ln = IV3T(name=name, meastype=meastype, area=self.lightarea)
         lnout = IV3T(name=name, shape=0, meastype=meastype, area=self.lightarea)
-        sign = np.sign(Voc3.Vzt[0] / Voc3.Vrz[0])
+        # Vzt and Vrz of a lit device have the sign of -top.pn and of bot.pn.
+        # The polarity gives the orientation of the line also for a junction
+        # without light, where the ratio of the two Voc is 0 / 0 or rounding.
+        sign = -float(self.top.pn * self.bot.pn)
         x0 = 0
         if abs(Voc3.Vzt[0]) * top > abs(Voc3.Vrz[0]) * bot:
             yconstraint = "x * " + stop + " / " + sbot + " * (" + str(sign) + ")"
