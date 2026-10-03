@@ -377,6 +377,8 @@ def test_run_ey_2T(nsrdb_data, tc_eqet, bc_eqet):
         np.savetxt(test_file, [energy_out, ey_eff], delimiter=",")
     ref = np.loadtxt(test_file, delimiter=",")
     np.testing.assert_allclose([energy_out, ey_eff], ref, rtol=1e-4)
+    # the timestep-by-timestep solver must stay on the same baseline
+    np.testing.assert_allclose(ey.run_ey(tandem2T, "CM", multiprocessing=False, vectorized=False), ref, rtol=1e-4)
 
     assert energy_out > 0
     assert 0 < ey_eff < 1
@@ -390,6 +392,8 @@ def test_run_ey_3T(nsrdb_data, tc_eqet, bc_eqet):
     if REGENERATE_TEST_FILES:
         np.savetxt(test_file, [energy_out, ey_eff], delimiter=",")
     np.testing.assert_allclose([energy_out, ey_eff], np.loadtxt(test_file, delimiter=","), rtol=1e-4)
+    # the timestep-by-timestep solver must stay on the same baseline
+    np.testing.assert_allclose(ey.run_ey(tandem3T, "CM", multiprocessing=False, vectorized=False), np.loadtxt(test_file, delimiter=","), rtol=1e-4)
 
     ey = _make_full_meteo(nsrdb_data, tc_eqet, bc_eqet, n=200)
     energy_out, ey_eff = ey.run_ey(tandem3T, "CM", multiprocessing=True)
@@ -397,15 +401,27 @@ def test_run_ey_3T(nsrdb_data, tc_eqet, bc_eqet):
     if REGENERATE_TEST_FILES:
         np.savetxt(test_file, [energy_out, ey_eff], delimiter=",")
     np.testing.assert_allclose([energy_out, ey_eff], np.loadtxt(test_file, delimiter=","), rtol=1e-4)
+    # ... and so must its multiprocessing pool
+    np.testing.assert_allclose(ey.run_ey(tandem3T, "CM", multiprocessing=True, vectorized=False), np.loadtxt(test_file, delimiter=","), rtol=1e-4)
 
     energy_out, ey_eff = ey.run_ey(tandem3T, "MPP", multiprocessing=True)
     test_file: Path = _TEST_FILES / "ey_run_3T_MPP_n200.txt"
     if REGENERATE_TEST_FILES:
         np.savetxt(test_file, [energy_out, ey_eff], delimiter=",")
     np.testing.assert_allclose([energy_out, ey_eff], np.loadtxt(test_file, delimiter=","), rtol=1e-4)
+    # Tandem3T.MPP stops on a coarse current grid: timestep by timestep the yield is up to 1e-3 lower
+    per_row = ey.run_ey(tandem3T, "MPP", multiprocessing=False, vectorized=False)
+    np.testing.assert_allclose(per_row, np.loadtxt(test_file, delimiter=","), rtol=1e-3)
+    assert per_row[0] <= energy_out
 
     energy_out, ey_eff = ey.run_ey(tandem3T, "VM-21-r", multiprocessing=True)
     test_file = _TEST_FILES / "ey_run_3T_VM21r_n200.txt"
+    if REGENERATE_TEST_FILES:
+        np.savetxt(test_file, [energy_out, ey_eff], delimiter=",")
+    np.testing.assert_allclose([energy_out, ey_eff], np.loadtxt(test_file, delimiter=","), rtol=1e-4)
+
+    energy_out, ey_eff = ey.run_ey(tandem3T, "VM-21-s", multiprocessing=True)
+    test_file = _TEST_FILES / "ey_run_3T_VM21s_n200.txt"
     if REGENERATE_TEST_FILES:
         np.savetxt(test_file, [energy_out, ey_eff], delimiter=",")
     np.testing.assert_allclose([energy_out, ey_eff], np.loadtxt(test_file, delimiter=","), rtol=1e-4)
@@ -752,6 +768,352 @@ def test_temperature_model_stores_ref_value(tc_eqet):
     np.testing.assert_allclose(model.apply(np.array([10.0, 40.0])), model.apply(np.array([10.0, 40.0]), model.ref_value))
     with pytest.raises(ValueError, match="no ref_value"):
         TemperatureModel(ModelType.LINEAR, model.params).apply(25.0)
+
+
+#################################################
+# VM cell type and 2T short circuit of a Tandem3T
+#################################################
+
+
+def _device_at_timestep(m, k, model):
+    """Copy of ``model`` at the conditions of timestep ``k`` of Meteo ``m``."""
+    dev = model.copy()
+    dev.top.set(Eg=m.bandgaps[k, 0], sigma=0.0, Jext=m.jscs[k, 0] / 1e3, TC=m.cell_temp.iloc[k])
+    dev.bot.set(Eg=m.bandgaps[k, 1], sigma=0.0, Jext=m.jscs[k, 1] / 1e3, TC=m.cell_temp.iloc[k])
+    return dev
+
+
+def _vm_power(m, k, equal_pn):
+    dev = _device_at_timestep(m, k, pvc.Tandem3T())
+    dev.bot.pn = dev.top.pn if equal_pn else -dev.top.pn
+    _, mpp = dev.VM(2, 1)
+    return float(mpp.Ptot[0])
+
+
+@pytest.mark.parametrize("vectorized, rtol", [(False, 1e-9), (True, 2e-5)])
+@pytest.mark.parametrize("suffix, equal_pn", [("r", True), ("s", False)])
+def test_run_ey_VM_cell_type_follows_label(suffix, equal_pn, vectorized, rtol):
+    """'VM-..-r' must solve an r-type cell (equal pn), 'VM-..-s' an s-type cell (opposite pn).
+
+    pvcircuit convention: Tandem3T defaults to pn = [-1, 1] (s-type); the
+    r-type tests and notebooks set bot.pn equal to top.pn.
+    """
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    _populate(m, irr)
+    m.run_ey(pvc.Tandem3T(), f"VM-21-{suffix}", multiprocessing=False, vectorized=vectorized)
+    for k in (9, 12, 15):
+        np.testing.assert_allclose(m.results["Pmp"].iloc[k], _vm_power(m, k, equal_pn), rtol=rtol)
+        # the two cell types give different power, so the label matters
+        assert abs(_vm_power(m, k, True) / _vm_power(m, k, False) - 1.0) > 1e-3
+
+
+def test_run_ey_VM_rejects_unknown_cell_type():
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    _populate(m, irr)
+    with pytest.raises(ValueError, match="VM-"):
+        m.run_ey(pvc.Tandem3T(), "VM-21-x", multiprocessing=False)
+
+
+def _leaky_tandem3T():
+    """s-type tandem with shunts and series resistance: Isc3 and the 2T short circuit differ."""
+    dev = pvc.Tandem3T()
+    dev.top.set(Gsh=5e-4, Rser=1.25)
+    dev.bot.set(Gsh=5e-4, Rser=1.25)
+    return dev
+
+
+def test_run_ey_3T_CM_reports_2T_short_circuit():
+    """CM leaves the z contact floating: Isc is the series-stack value (Vtr = 0, Izo = 0).
+
+    Isc3 shorts all three terminals, so the z contact carries the mismatch
+    current and min(|IA|, |IB|) is only the smaller subcell current.
+    """
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    _populate(m, irr)  # 20 / 18 mA/cm^2 at noon: bottom limited
+    m.run_ey(_leaky_tandem3T(), "CM", multiprocessing=False)
+    for k in (9, 12):
+        dev = _device_at_timestep(m, k, _leaky_tandem3T())
+        series = pvc.Multi2T.from_3T(dev).Isc()  # resolves 1e-7 of the limiting current
+        isc3 = dev.Isc3()
+        three_terminal = min(abs(isc3.IA[0]), abs(isc3.IB[0]))
+        np.testing.assert_allclose(m.results["Isc"].iloc[k], series, rtol=1e-6)
+        assert abs(three_terminal / series - 1.0) > 1e-2
+
+
+def test_run_ey_3T_r_type_CM_keeps_Isc3():
+    """An r-type cell has no 2T series operation; its CM row keeps the Isc3 value."""
+    r_type = pvc.Tandem3T()
+    r_type.bot.set(pn=-1)
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    _populate(m, irr)
+    m.run_ey(r_type, "CM", multiprocessing=False)
+    dev = _device_at_timestep(m, 12, r_type)
+    isc3 = dev.Isc3()
+    np.testing.assert_allclose(m.results["Isc"].iloc[12], min(abs(isc3.IA[0]), abs(isc3.IB[0])), rtol=1e-9)
+
+
+#################################################
+# run_ey solves all timesteps at once (the *_rows methods of the device)
+#################################################
+
+
+def _run_both(make_model, oper="CM", ndays=1):
+    """run_ey with all timesteps at once and timestep by timestep on the same synthetic day(s).
+
+    ``irr > 1.0`` selects the lit rows: the 18:00 sample of the synthetic day is
+    a rounding-level 1e-13 W/m^2, which is dark for the solver.
+    """
+    out = {}
+    for vectorized in (True, False):
+        m, irr, _ = _synthetic_meteo(ndays=ndays)
+        _populate(m, irr)
+        energy_out, _ = m.run_ey(make_model(), oper, multiprocessing=False, vectorized=vectorized)
+        out[vectorized] = (energy_out, m.results.copy())
+    return out[True], out[False], irr
+
+
+def _reversed_polarity_tandem3T():
+    return pvc.Tandem3T(pn=[1, -1])
+
+
+def _unequal_area_tandem3T():
+    dev = pvc.Tandem3T()
+    dev.top.set(totalarea=0.8, lightarea=0.8, Rser=0.5)
+    dev.bot.set(lightarea=0.9, Rser=0.5)
+    return dev
+
+
+def _r_type_tandem3T():
+    dev = pvc.Tandem3T()
+    dev.bot.set(pn=-1)
+    return dev
+
+
+# The per-row searches stop on a grid: Multi2T.MPP / Tandem3T.CM / Tandem3T.VM are
+# up to ~2e-5 low on a single row, Tandem3T.MPP (two loads) up to ~1e-3. The
+# *_rows methods refine to the optimum.
+_ALL_ROWS_CASES = [
+    (pvc.Multi2T, "CM", 5e-5, 2e-3),
+    (pvc.Tandem3T, "CM", 5e-5, 2e-3),
+    (_reversed_polarity_tandem3T, "CM", 5e-5, 2e-3),
+    (_leaky_tandem3T, "CM", 5e-5, 2e-3),
+    (_unequal_area_tandem3T, "CM", 5e-5, 2e-3),
+    (pvc.Tandem3T, "MPP", 2e-3, 5e-2),
+    (_reversed_polarity_tandem3T, "MPP", 2e-3, 5e-2),
+    (_leaky_tandem3T, "MPP", 2e-3, 5e-2),
+    (_unequal_area_tandem3T, "MPP", 2e-3, 5e-2),
+    (pvc.Tandem3T, "VM-21-s", 5e-5, 1e-2),
+    (pvc.Tandem3T, "VM-21-r", 5e-5, 1e-2),
+    (pvc.Tandem3T, "VM-32-r", 5e-5, 1e-2),
+    (_reversed_polarity_tandem3T, "VM-21-r", 5e-5, 1e-2),
+    (_leaky_tandem3T, "VM-11-s", 5e-5, 1e-2),
+    (_unequal_area_tandem3T, "VM-21-s", 5e-5, 1e-2),
+]
+
+
+@pytest.mark.parametrize("make_model, oper, rtol_power, rtol_point", _ALL_ROWS_CASES)
+def test_run_ey_vectorized_matches_per_row(make_model, oper, rtol_power, rtol_point):
+    (energy_vec, vec), (energy_row, row), irr = _run_both(make_model, oper)
+    np.testing.assert_allclose(energy_vec, energy_row, rtol=rtol_power)
+    np.testing.assert_allclose(vec["Pmp"], row["Pmp"], rtol=rtol_power)
+    assert np.all(vec["Pmp"] >= row["Pmp"] * (1.0 - 1e-9)), "the refined optimum must not be below the grid optimum"
+    np.testing.assert_allclose(vec["Voc"], row["Voc"], rtol=1e-9)
+    np.testing.assert_allclose(vec["Isc"], row["Isc"], rtol=1e-6)
+    np.testing.assert_allclose(vec["Vmp"], row["Vmp"], rtol=rtol_point)
+    np.testing.assert_allclose(vec["Imp"], row["Imp"], rtol=rtol_point)
+    assert np.all(vec.to_numpy()[irr == 0] == 0.0)
+    assert np.all(vec["Pmp"].to_numpy()[irr > 1.0] > 0.0)
+
+
+def test_run_ey_vectorized_keeps_voltage_sign_of_reversed_polarity():
+    """The per-row solver reports VA - VB, which is negative for pn = [1, -1]."""
+    for oper in ("CM", "MPP", "VM-21-s"):
+        (_, vec), (_, row), irr = _run_both(_reversed_polarity_tandem3T, oper)
+        assert np.all(row["Voc"].to_numpy()[irr > 1.0] < 0.0)
+        assert np.all(vec["Voc"].to_numpy()[irr > 1.0] < 0.0)
+        assert np.all(vec["Vmp"].to_numpy()[irr > 1.0] < 0.0)
+
+
+@pytest.mark.parametrize("make_model, oper", [(pvc.Multi2T, "CM"), (pvc.Tandem3T, "CM"), (pvc.Tandem3T, "MPP"), (pvc.Tandem3T, "VM-21-r"), (pvc.Tandem3T, "VM-21-s")])
+def test_run_ey_solves_all_timesteps_at_once_by_default(monkeypatch, make_model, oper):
+    def not_allowed(*args, **kwargs):
+        raise AssertionError("unexpected solver")
+
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    _populate(m, irr)
+    model = make_model()
+    before = str(model)
+    with monkeypatch.context() as patch:
+        patch.setattr(pvc.EY, "_calc_yield_async", not_allowed)
+        energy_vec, _ = m.run_ey(model, oper)  # default: no pool, no per-row call
+    with monkeypatch.context() as patch:
+        patch.setattr(pvc.EY, "_calc_yield_rows", not_allowed)
+        energy_row, _ = m.run_ey(model, oper, multiprocessing=False, vectorized=False)
+    np.testing.assert_allclose(energy_vec, energy_row, rtol=2e-3)
+    assert str(model) == before, "run_ey must not modify the device"
+
+
+def test_run_ey_solves_an_r_type_CM_timestep_by_timestep(monkeypatch):
+    """An r-type cell in CM operation is not a series stack: it has no *_rows solver."""
+
+    def not_allowed(*args, **kwargs):
+        raise AssertionError("an r-type cell in CM operation must not be solved by the *_rows methods")
+
+    monkeypatch.setattr(pvc.EY, "_calc_yield_rows", not_allowed)
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    _populate(m, irr)
+    energy_out, _ = m.run_ey(_r_type_tandem3T(), "CM", multiprocessing=False)
+    assert np.isfinite(energy_out)
+
+
+def test_run_ey_legacy_solver_setting(monkeypatch):
+    """junction.SOLVER = "legacy" restores the timestep-by-timestep run, also in the worker processes."""
+
+    def not_allowed(*args, **kwargs):
+        raise AssertionError("the legacy setting must not use the *_rows methods")
+
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    _populate(m, irr)
+    m.run_ey(pvc.Multi2T(), "CM", multiprocessing=False, vectorized=False)
+    fast = m.results.copy()
+    monkeypatch.setattr(pvc.junction, "SOLVER", "legacy")
+    with monkeypatch.context() as patch:
+        patch.setattr(pvc.EY, "_calc_yield_rows", not_allowed)
+        m.run_ey(pvc.Multi2T(), "CM", multiprocessing=False)
+        legacy = m.results.copy()
+        m.run_ey(pvc.Multi2T(), "CM", multiprocessing=True)
+        pool = m.results.copy()
+    np.testing.assert_array_equal(pool.to_numpy(), legacy.to_numpy())  # the workers use the legacy solver, too
+    lit = irr > 1.0
+    # the legacy Multi2T.Isc steps to 1e-7 of the root: close to the Newton result, but not it
+    np.testing.assert_allclose(legacy["Isc"], fast["Isc"], rtol=1e-6)
+    assert np.all(legacy["Isc"].to_numpy()[lit] != fast["Isc"].to_numpy()[lit])
+    # an explicit request still solves all timesteps at once
+    m.run_ey(pvc.Multi2T(), "CM", vectorized=True)
+    np.testing.assert_allclose(m.results["Pmp"], legacy["Pmp"], rtol=1e-6)
+
+
+@pytest.mark.parametrize("make_model, oper", [(pvc.Multi2T, "CM"), (pvc.Tandem3T, "MPP"), (pvc.Tandem3T, "VM-21-r")])
+def test_run_ey_vectorized_chunks_give_the_same_rows(monkeypatch, make_model, oper):
+    m, irr, _ = _synthetic_meteo(ndays=2)
+    _populate(m, irr)
+    energy_whole, _ = m.run_ey(make_model(), oper)
+    whole = m.results.copy()
+    monkeypatch.setattr(pvc.EY, "_ROWS_PER_CALL", 7)  # 48 rows --> 7 chunks, the last one short
+    energy_chunked, _ = m.run_ey(make_model(), oper)
+    np.testing.assert_allclose(energy_chunked, energy_whole, rtol=1e-12)
+    # MPP: the flat two-current optimum turns last-ulp differences of the scan into about 1e-6 in Vmp / Imp (Pmp 5e-11)
+    rtol = {"Vmp": 1e-5, "Imp": 1e-5} if oper == "MPP" else {}
+    for col in whole.columns:
+        np.testing.assert_allclose(m.results[col].to_numpy(), whole[col].to_numpy(), rtol=rtol.get(col, 1e-9), err_msg=col)
+    assert list(m.results.index) == list(whole.index)
+
+
+@pytest.mark.parametrize("make_model, oper", [(pvc.Multi2T, "CM"), (pvc.Tandem3T, "CM"), (pvc.Tandem3T, "MPP"), (pvc.Tandem3T, "VM-21-s")])
+def test_run_ey_vectorized_zero_output_rows(make_model, oper):
+    """Night rows and rows with a non-finite input give exactly zero, as in the per-row solver."""
+    m, irr, _ = _synthetic_meteo(ndays=1)
+    jsc = irr / 1000 * 20.0
+    jsc[12] = np.nan
+    eg = np.full(len(irr), 1.7)
+    eg[10] = np.nan
+    m.add_currents(jsc)
+    m.add_currents(irr / 1000 * 18.0)
+    m.add_bandgaps(eg)
+    m.add_bandgaps(np.full(len(irr), 1.1))
+    energy_out, _ = m.run_ey(make_model(), oper)
+    res = m.results.to_numpy()
+    assert np.isfinite(energy_out) and np.all(np.isfinite(res))
+    assert np.all(res[[10, 12]] == 0.0)
+    assert np.all(res[irr == 0] == 0.0)
+    assert np.all(res[[9, 11, 13], 4] > 0.0)
+
+
+@pytest.mark.parametrize("make_model, oper", [(pvc.Multi2T, "CM"), (pvc.Tandem3T, "CM"), (pvc.Tandem3T, "MPP"), (pvc.Tandem3T, "VM-21-s"), (pvc.Tandem3T, "VM-21-r")])
+def test_run_ey_row_with_negative_jsc_keeps_the_per_row_solver(make_model, oper):
+    """An unclipped negative photocurrent has no generating operating point to search for.
+
+    Such a row is solved timestep by timestep in either case, and it must not
+    derail the other rows. (Tandem3T.VM used to raise NameError on it.)
+    """
+    results = {}
+    for vectorized in (True, False):
+        m, irr, _ = _synthetic_meteo(ndays=1)
+        bottom = irr / 1000 * 18.0
+        bottom[12] = -0.5  # e.g. from a temperature fit that was not clipped at zero
+        m.add_currents(irr / 1000 * 20.0)
+        m.add_currents(bottom)
+        m.add_bandgaps(np.full(len(irr), 1.7))
+        m.add_bandgaps(np.full(len(irr), 1.1))
+        m.run_ey(make_model(), oper, multiprocessing=False, vectorized=vectorized)
+        results[vectorized] = m.results.to_numpy()
+    assert np.all(np.isfinite(results[True]))
+    np.testing.assert_array_equal(results[True][12], results[False][12])
+    others = np.arange(len(irr)) != 12
+    np.testing.assert_allclose(results[True][others, 4], results[False][others, 4], rtol=2e-3)
+    assert np.all(results[True][others, 4] >= results[False][others, 4] * (1.0 - 1e-9))
+
+
+# Unshunted top junction with a negative photocurrent: the 2T stack carries the
+# floor current 0.002 A at short circuit, but it has no operating point with power.
+_NO_POWER_JSC = [-2.0, 25.433]  # mA/cm^2
+_NO_POWER_EG = [1.8, 1.4]
+
+
+@pytest.mark.parametrize("solver", ["fast", "legacy"])
+@pytest.mark.parametrize("make_model", [pvc.Multi2T, pvc.Tandem3T])
+def test_calc_yield_async_row_without_power_gives_zero_output(monkeypatch, make_model, solver):
+    """A timestep without power reports 0 in every column, as a timestep without light.
+
+    Regression: with the fast solver the row reported the floor current as Isc
+    (and as Imp for Multi2T) while Pmp was 0.
+    """
+    monkeypatch.setattr(pvc.junction, "SOLVER", solver)
+    row = pvc.EY._calc_yield_async(np.array([_NO_POWER_JSC]), np.array([_NO_POWER_EG]), np.zeros((1, 2)), pd.Series([25.0]), make_model(), "CM")
+    np.testing.assert_array_equal(row.to_numpy(), np.zeros((1, 5)))
+
+
+@pytest.mark.parametrize("make_model", [pvc.Multi2T, pvc.Tandem3T])
+def test_run_ey_row_without_power_gives_zero_output(make_model):
+    results = {}
+    for vectorized in (True, False):
+        m, irr, _ = _synthetic_meteo(ndays=1)
+        _populate(m, irr)
+        m.jscs[12] = _NO_POWER_JSC  # noon row
+        m.bandgaps[12] = _NO_POWER_EG
+        m.run_ey(make_model(), "CM", multiprocessing=False, vectorized=vectorized)
+        results[vectorized] = m.results.to_numpy()
+    np.testing.assert_array_equal(results[True][12], np.zeros(5))
+    np.testing.assert_array_equal(results[False][12], np.zeros(5))
+
+
+def test_run_ey_vectorized_hands_unsolved_rows_to_the_per_row_solver(monkeypatch):
+    """A row the *_rows methods return as non-finite is solved per row, not zeroed."""
+    solve_2T = pvc.Multi2T.MPP_rows
+    solve_3T = pvc.Tandem3T.VM_rows
+
+    def partly_failing_2T(self, *args, **kwargs):
+        mpp = solve_2T(self, *args, **kwargs)
+        mpp["Pmp"][2] = np.nan  # third lit row of the day
+        return mpp
+
+    def partly_failing_3T(self, *args, **kwargs):
+        iv3T = solve_3T(self, *args, **kwargs)
+        iv3T.Iro[2] = np.nan
+        iv3T.Pcalc()  # marks the power of that row with -100
+        return iv3T
+
+    for make_model, oper, cls, name, replacement in ((pvc.Multi2T, "CM", pvc.Multi2T, "MPP_rows", partly_failing_2T), (pvc.Tandem3T, "VM-21-s", pvc.Tandem3T, "VM_rows", partly_failing_3T)):
+        (_, vec), (_, row), irr = _run_both(make_model, oper)
+        lit = np.flatnonzero(irr > 1.0)
+        with monkeypatch.context() as patch:
+            patch.setattr(cls, name, replacement)
+            m, irr, _ = _synthetic_meteo(ndays=1)
+            _populate(m, irr)
+            m.run_ey(make_model(), oper)
+        np.testing.assert_array_equal(m.results.iloc[lit[2]].to_numpy(), row.iloc[lit[2]].to_numpy())
+        others = np.arange(len(irr)) != lit[2]
+        np.testing.assert_array_equal(m.results.to_numpy()[others], vec.to_numpy()[others])
 
 
 #################################################

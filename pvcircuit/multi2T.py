@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 import matplotlib.pyplot as plt  # plotting
 import numpy as np  # arrays
-from scipy.optimize import root_scalar
+from scipy.optimize import elementwise, root_scalar
 
 from pvcircuit import junction
 from pvcircuit.junction import Junction
@@ -272,27 +272,8 @@ class Multi2T:
         I_flat = np.atleast_1d(I_in).ravel()
         npts = I_flat.size
 
-        Vmid = np.empty((self.njuncs, npts), dtype=np.float64)
-        jem_prev: np.ndarray | None = None  # emission of the previous junction, per point
-        JLC_last = np.zeros(self.njuncs, dtype=np.float64)
-        for i, junc in enumerate(self.j):
-            st = junc._solver_state()
-            if i > 0:  # previous LC
-                assert jem_prev is not None
-                prev = self.j[i - 1]
-                JLC = junc.beta * jem_prev
-                if prev.totalarea < junc.totalarea:  # distribute LC over total area
-                    JLC = JLC * prev.totalarea / junc.totalarea
-            else:
-                JLC = np.zeros(npts)  # no LC in top junction
-
-            Jphoto = junc.Jext * junc.lightarea / junc.totalarea + JLC
-            if st["notdiode"]:
-                Vmid[i] = 0.0
-            else:
-                Vmid[i] = junc._vdiode_arr(Jphoto + I_flat / junc.totalarea, state=st)
-            jem_prev = junction._jem_arr(Vmid[i], Jphoto, st)
-            JLC_last[i] = JLC[-1] if npts else 0.0
+        states, Jphoto0 = self._state()
+        Vmid, JLC = self._V2T_core(I_flat, states, Jphoto0)
 
         # Rs2T [\Omega*cm^2] * I [A] / totalarea [cm^2] = V (series-resistance drop).
         Vtot = Vmid.sum(axis=0) + self.Rs2T * I_flat / self.totalarea
@@ -300,12 +281,126 @@ class Multi2T:
         # historical state side-effects: JLC and Vmid reflect the last point
         if npts:
             for i, junc in enumerate(self.j):
-                junc.JLC = np.float64(JLC_last[i])
+                junc.JLC = np.float64(JLC[i, -1])
                 self.Vmid[i] = Vmid[i, -1]
 
         if scalar:
             return float(Vtot[0])
         return Vtot.reshape(I_in.shape)
+
+    def _state(self):
+        """Solver state and photocurrent density of every junction at the device's own operating condition.
+
+        Returns (states, Jphoto0) for _V2T_core: Junction._solver_state() and
+        the photocurrent density without luminescent coupling [A/cm^2].
+        """
+        states = [junc._solver_state() for junc in self.j]
+        Jphoto0 = [junc.Jext * junc.lightarea / junc.totalarea for junc in self.j]
+        return states, Jphoto0
+
+    def _state_rows(self, TC, Eg, sigma, Jext):
+        """Per-row twin of _state for rows of operating conditions.
+
+        TC (rows,) [C]; Eg, sigma [eV] and Jext [A/cm^2] (rows, njuncs), or
+        anything that broadcasts to that shape. Returns (nrows, states,
+        Jphoto0) with Junction._solver_state_rows states and (rows,)
+        photocurrent densities. The device is not modified.
+        """
+        TC = np.atleast_1d(np.asarray(TC, dtype=np.float64))
+        shape = (TC.size, self.njuncs)
+
+        def per_junction(values):
+            values = np.asarray(values, dtype=np.float64)
+            return values.reshape(shape) if values.size == TC.size * self.njuncs else np.broadcast_to(values, shape)
+
+        Eg, sigma, Jext = per_junction(Eg), per_junction(sigma), per_junction(Jext)
+        states = [junc._solver_state_rows(TC, Eg[:, k], sigma[:, k]) for k, junc in enumerate(self.j)]
+        Jphoto0 = [Jext[:, k] * float(junc.lightarea) / float(junc.totalarea) for k, junc in enumerate(self.j)]
+        return TC.size, states, Jphoto0
+
+    def _V2T_core(self, current, states, Jphoto0):
+        """Junction voltages at the series current ``current`` [A], all points at once.
+
+        ``states[i]`` and ``Jphoto0[i]`` are the solver state of junction i and
+        its photocurrent density without luminescent coupling [A/cm^2]: for
+        one operating condition shared by all points (_state) or for one
+        condition per point (_state_rows, see also junction._state_take).
+        Returns (Vmid, JLC), each of shape (njuncs, npts): the junction
+        voltages and the luminescent coupling current densities.
+        """
+        npts = current.size
+        Vmid = np.empty((self.njuncs, npts), dtype=np.float64)
+        JLC = np.zeros((self.njuncs, npts), dtype=np.float64)  # no LC in top junction
+        jem_prev: np.ndarray | None = None  # emission of the previous junction, per point
+        for i, junc in enumerate(self.j):
+            st = states[i]
+            Jphoto = Jphoto0[i]
+            if i > 0:  # previous LC
+                assert jem_prev is not None
+                prev = self.j[i - 1]
+                JLC[i] = junc.beta * jem_prev
+                if prev.totalarea < junc.totalarea:  # distribute LC over total area
+                    JLC[i] = JLC[i] * prev.totalarea / junc.totalarea
+                Jphoto = Jphoto + JLC[i]
+
+            Vmid[i] = junc._vdiode_arr(Jphoto + current / junc.totalarea, state=st)
+            jem_prev = junction._jem_arr(Vmid[i], Jphoto, st)
+        return Vmid, JLC
+
+    def _V2T_states(self, current, states, Jphoto0):
+        """[V] terminal voltage for prepared junction states (see _V2T_core); no side effects."""
+        Vmid, _ = self._V2T_core(current, states, Jphoto0)
+        return Vmid.sum(axis=0) + self.Rs2T * current / self.totalarea
+
+    def V2T_rows(self, current, TC, Eg, sigma, Jext):
+        """
+        V2T for many operating conditions at once.
+
+        Row k of (TC, Eg, sigma, Jext) is one operating condition, e.g. one
+        timestep of an energy-yield run, and ``current[k]`` [A] its terminal
+        current (generation negative, as in V2T); a scalar is used for every
+        row. TC (rows,) [C]; Eg, sigma [eV] and Jext [A/cm^2] (rows, njuncs).
+        Everything that does not vary by row (n, J0ratio, Gsh, RBB, beta,
+        gamma, areas, Rs2T) comes from this device, which is not modified.
+
+        Returns the (rows,) terminal voltages [V]: the same values as setting
+        each row on the device and calling V2T, solved together. np.nan where
+        a junction has no solution within its voltage range.
+        """
+        nrows, states, Jphoto0 = self._state_rows(TC, Eg, sigma, Jext)
+        current = np.array(np.broadcast_to(np.asarray(current, dtype=np.float64), (nrows,)))
+        return self._V2T_states(current, states, Jphoto0)
+
+    def MPP_rows(self, TC, Eg, sigma, Jext, pnts=11):
+        """
+        MPP for many operating conditions at once.
+
+        Row k of (TC, Eg, sigma, Jext) is one operating condition, e.g. one
+        timestep of an energy-yield run; see V2T_rows for the arguments. The
+        search of MPP for every row (five ``pnts``-point scans between -Isc
+        and 0), followed by a refinement to the optimum, where MPP stops on
+        its grid.
+
+        Returns a dict of (rows,) arrays with the MPP keys Voc, Isc, Vmp,
+        Imp, Pmp [V, A, V, A, W]; np.nan for rows without a solution.
+        """
+        nrows, states, Jphoto0 = self._state_rows(TC, Eg, sigma, Jext)
+        rows = np.arange(nrows)
+
+        def V2T(current, index):
+            # point k at the operating condition of row index[k]
+            return self._V2T_states(current, [junction._state_take(st, index) for st in states], [Jph[index] for Jph in Jphoto0])
+
+        Voc = V2T(np.zeros(nrows), rows)
+        # limiting junction photocurrent [A], without luminescent coupling; positive with a
+        # negative photocurrent: the current floor of that junction (see _I2T_points)
+        photo = np.max([-float(junc.totalarea) * Jph for junc, Jph in zip(self.j, Jphoto0)], axis=0)
+        positive = photo > 0.0
+        Isc = np.abs(self._I2T_points(V2T, np.zeros(nrows), np.where(positive, 0.0, photo), np.where(positive, photo, 0.0)))
+
+        Imp, Pmp, _ = junction._maximize_rows(lambda current, index: -V2T(current, index) * current, -Isc, np.zeros(nrows), rows, pnts, 5)
+        Vmp = V2T(Imp, rows)
+        return {"Voc": Voc, "Isc": Isc, "Vmp": Vmp, "Imp": np.abs(Imp), "Pmp": Pmp}
 
     def Imaxrev(self):
         """Maximum series current magnitude before a junction has no root.
@@ -332,6 +427,132 @@ class Multi2T:
         return voltage - target_voltage
 
     def I2T(self, V):
+        """
+        calculate I(V) of 2T multijunction: the current [A] at the terminal voltage V
+
+        ``V`` may be a scalar (returns a float) or an ndarray (returns an
+        ndarray of the same shape; all voltages are solved together).
+        np.nan where the stack has no solution. On the saturated branch of an
+        unshunted limiting junction, where the IV curve is vertical, the
+        limiting current is returned.
+
+        With pvcircuit.junction.SOLVER = "legacy" every voltage is solved by
+        Dan's stepping algorithm (_I2T_stepping), which resolves the current
+        to 1e-7 of the limiting current.
+        """
+        if junction._legacy_solver():
+            if np.ndim(V) == 0:
+                return self._I2T_stepping(V)
+            V_in = np.asarray(V, dtype=np.float64)
+            return np.array([self._I2T_stepping(v) for v in V_in.ravel()], dtype=np.float64).reshape(V_in.shape)
+
+        V_in = np.asarray(V, dtype=np.float64)
+        states, Jphoto0 = self._state()
+        # limiting junction photocurrent [A], without luminescent coupling; positive with a
+        # negative photocurrent: the current floor of that junction (see _I2T_points)
+        photo = max(-float(junc.totalarea * Jph) for junc, Jph in zip(self.j, Jphoto0))
+        I_photo, I_floor = (0.0, photo) if photo > 0.0 else (photo, 0.0)
+        current = self._I2T_points(lambda current, index: self._V2T_states(current, states, Jphoto0), V_in.ravel(), np.full(V_in.size, I_photo), np.full(V_in.size, I_floor))
+        solved = current[np.isfinite(current)]
+        if solved.size:
+            self.V2T(solved[-1])  # leave JLC and Vmid at the last solved point, as V2T does
+        if V_in.ndim == 0:
+            return float(current[0])
+        return current.reshape(V_in.shape)
+
+    @staticmethod
+    def _I2T_points(V2T, voltage, I_photo, I_floor):
+        """Current [A] at which V2T(current, index) equals ``voltage``, all points at once.
+
+        ``V2T(current, index)`` returns the terminal voltage of the points
+        ``index`` (integer array into ``voltage``) at ``current`` and rises
+        with the current. ``I_photo`` [A] is the limiting junction
+        photocurrent of every point (negative, or 0): the root lies between
+        it and zero unless shunt, breakdown or luminescent coupling carry
+        current there. The bracket is then widened geometrically until V2T
+        crosses the voltage or has no solution (np.nan). Towards short
+        circuit that means the limiting junction is saturated, and the root
+        finder converges onto that current.
+
+        ``I_floor`` [A] (>= 0) is, per point, the largest -totalarea * Jph of
+        the junctions with a negative photocurrent, else 0. Without a shunt
+        such a junction has no solution below that current (to within
+        totalarea * sum(J0)), so a np.nan of V2T counts as reverse there, and
+        the forward bracket starts at the floor where the root lies above it;
+        with a shunt or luminescent coupling the root can lie between 0 and
+        the floor. Below the floor the IV curve is vertical: a root there is
+        the floor, as on the saturated branch towards short circuit.
+        """
+        npts = voltage.size
+        index = np.arange(npts, dtype=np.float64)
+
+        def residual(current, idx):
+            idx = idx.astype(np.intp)
+            V = V2T(current, idx)
+            # no solution: so far in reverse or in forward that a junction leaves its voltage range
+            V = np.where(np.isfinite(V), V, np.where(current > I_floor[idx], 1.0e3, -1.0e3))
+            return V - voltage[idx]
+
+        lo = np.full(npts, np.nan)
+        hi = np.full(npts, np.nan)
+        step = 1e-9 * np.maximum(np.abs(I_photo), I_floor) + 1e-18
+        with np.errstate(invalid="ignore"):
+            f0 = residual(np.zeros(npts), index)  # open circuit
+            reverse = np.flatnonzero(f0 > 0.0)  # root at a negative current
+            forward = np.flatnonzero(f0 < 0.0)  # root at a positive current
+
+        above = residual(I_photo[reverse], index[reverse]) > 0.0  # root below the photocurrent
+        hi[reverse] = np.where(above, I_photo[reverse], 0.0)
+        lo[reverse[~above]] = I_photo[reverse[~above]]
+        need = reverse[above]
+        for k in range(60):
+            if need.size == 0:
+                break
+            I_try = I_photo[need] - step[need] * 8.0**k
+            found = residual(I_try, index[need]) <= 0.0
+            lo[need[found]] = I_try[found]
+            hi[need[~found]] = I_try[~found]
+            need = need[~found]
+        lo[need] = np.nan
+
+        # the forward bracket starts at 0, or at the floor where the root lies above it
+        start = np.zeros(npts)
+        floored = forward[I_floor[forward] > 0.0]
+        if floored.size:
+            with np.errstate(invalid="ignore"):
+                below = residual(I_floor[floored], index[floored]) <= 0.0
+            start[floored] = np.where(below, I_floor[floored], 0.0)
+        lo[forward] = start[forward]
+        need = forward
+        for k in range(60):
+            if need.size == 0:
+                break
+            I_try = start[need] + step[need] * 8.0**k
+            found = residual(I_try, index[need]) >= 0.0
+            hi[need[found]] = I_try[found]
+            lo[need[~found]] = I_try[~found]
+            need = need[~found]
+
+        current = np.full(npts, np.nan)
+        current[f0 == 0.0] = 0.0
+        ok = np.isfinite(lo) & np.isfinite(hi)
+        if ok.any():
+            res = elementwise.find_root(residual, (lo[ok], hi[ok]), args=(index[ok],), tolerances=dict(xatol=1e-18, xrtol=1e-12))
+            current[ok] = np.where(res.success, res.x, np.nan)
+
+        # in forward a voltage beyond the range of the junctions is not a solution. Not
+        # checked: a root on the vertical branch at a floor, where the current is exact to
+        # 1e-12 relative but the voltage is off by the slope (about 3e11 V/A) times that;
+        # the floor is the answer there, as the limiting current is on the saturated branch
+        check = forward[np.isfinite(current[forward])]
+        check = check[~(I_floor[check] > 0.0) | (np.abs(current[check] - I_floor[check]) > 1e-7 * I_floor[check])]
+        if check.size:
+            with np.errstate(invalid="ignore"):
+                solved = np.abs(V2T(current[check], check) - voltage[check]) <= 1e-6
+            current[check[~solved]] = np.nan
+        return current
+
+    def _I2T_stepping(self, V):
         """
         calculate J(V) of 2T multijunction
         using Dan's algorithm
@@ -379,40 +600,60 @@ class Multi2T:
             return 0.0
 
         if V <= Voc:
+            # The residual V2T(I) - V rises with I and is positive at I = 0.
+            # Walk down from -Imaxrev until it is <= 0 (root bracketed) or V2T
+            # has no solution (a junction ran out of reverse range): shunt,
+            # breakdown and luminescent coupling all let the stack carry more
+            # than Imaxrev.
             I_max = 0.0
             f_max = Voc - V
             photo_boundaries = [-float(junc.Jphoto * junc.totalarea) for junc in self.j]
-            I_invalid = -float(self.Imaxrev())
-            I_min = I_invalid
+            I_min = -float(self.Imaxrev())
             f_min = self._I2T_root_target(I_min, V)
-
-            # Imaxrev is the largest junction reverse-current limit. With
-            # unequal limits it can put another junction just outside its
-            # voltage bracket. Locate the first finite current by bisection;
-            # the requested root may be exactly at that finite-domain edge.
-            if not np.isfinite(f_min):
-                I_finite = I_max
-                for _ in range(80):
-                    I_mid = (I_invalid + I_finite) / 2.0
-                    if I_mid == I_invalid or I_mid == I_finite:
-                        break
-                    f_mid = self._I2T_root_target(I_mid, V)
-                    if np.isfinite(f_mid):
-                        I_finite = I_mid
-                        f_min = f_mid
-                    else:
-                        I_invalid = I_mid
-                I_min = I_finite
-
-            bracket_candidates = []
-            for candidate in [I_min, *photo_boundaries]:
-                residual = self._I2T_root_target(candidate, V)
-                if np.isfinite(residual) and residual <= 0.0:
-                    bracket_candidates.append((candidate, residual))
-
-            if not bracket_candidates:
+            width = max(abs(I_min), 1e-12)
+            for _ in range(60):
+                if not (np.isfinite(f_min) and f_min > 0.0):
+                    break
+                I_max, f_max = I_min, f_min
+                I_min -= width
+                width *= 2.0
+                f_min = self._I2T_root_target(I_min, V)
+            else:
                 raise RuntimeError(f"Could not bracket I2T root at V={V:g} V")
-            I_min, f_min = max(bracket_candidates, key=lambda item: item[0])
+
+            if not np.isfinite(f_min):
+                # Bisect between the last valid current (residual > 0) and the
+                # invalid one for a point with residual <= 0. If the two meet
+                # without one, V2T jumps from above V straight to "no solution":
+                # the limiting junction is saturated, the IV curve is vertical
+                # there, and that current is the answer.
+                I_invalid = I_min
+                for _ in range(1100):
+                    I_mid = (I_invalid + I_max) / 2.0
+                    if I_mid == I_invalid or I_mid == I_max:
+                        return float(I_max)
+                    f_mid = self._I2T_root_target(I_mid, V)
+                    if not np.isfinite(f_mid):
+                        I_invalid = I_mid
+                    elif f_mid > 0.0:
+                        I_max, f_max = I_mid, f_mid
+                    else:
+                        I_min, f_min = I_mid, f_mid
+                        break
+                else:
+                    raise RuntimeError(f"Could not bracket I2T root at V={V:g} V")
+
+            # A junction's photocurrent is an exact root when the stack is
+            # current matched there (every junction at 0 V). Use it to tighten
+            # the bracket: the solve below cannot resolve the steep unshunted
+            # branch more finely than its current tolerance.
+            for I_photo in photo_boundaries:
+                if I_min < I_photo < I_max:
+                    f_photo = self._I2T_root_target(I_photo, V)
+                    if np.isfinite(f_photo) and f_photo <= 0.0:
+                        I_min, f_min = I_photo, f_photo
+                    elif np.isfinite(f_photo):
+                        I_max, f_max = I_photo, f_photo
             if abs(f_min) <= junction.XTOL_SOLVE:
                 return float(I_min)
         else:
@@ -504,6 +745,10 @@ class Multi2T:
             Vmp = Vtemp[nmax]
             Imp = abs(Itemp[nmax])
             FF = abs((Vmp * Imp) / (Voc * Isc))
+            if not np.isfinite(Pmp):
+                # no finite maximum power in the scan (np.argmax returns the first nan,
+                # index 0 where V2T is nan at every point): no maximum power point
+                Pmp = Vmp = Imp = FF = np.nan
 
             self.Vpoints = np.array([0.0, Vmp, Voc])
             self.Ipoints = np.array([-Isc, -Imp, 0.0])
