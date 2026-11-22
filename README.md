@@ -57,7 +57,7 @@ Name of this junction *string*
 Junction bandgap (eV)
 
 ### Junction.TC
-Junction temperature (°C)
+Junction temperature (°C). Note: changing `TC` updates `TK`, `Vth`, `Jdb(Eg, TC)`, and `J0`, while keeping `Eg`, `sigma`, and `Jext` fixed unless updated explicitly (e.g. via `EQET` / `Meteo.add_bandgaps`).
 
 ### Junction.Gsh
 Junction shunt conductance (S/cm2)
@@ -118,7 +118,7 @@ Thermal voltage = kT/q from TK
 
 ### Junction.Jdb
 Detailed balance current (A/cm2).
-If J0ratio for n=1 only this is Shockley-Quiesser limit
+For a single junction (or reflector-separated subcell with receiver `beta = 0`), `n = [1.0], J0ratio = [1.0]` is the Shockley-Queisser radiative limit; for a luminescing top junction coupled into a lower junction with `beta > 0` (Geisz 2015 Eq. 9, Structure I), the coupled radiative limit requires `J0ratio = [1.0 + beta]`.
 
 ### Junction.Jphoto
 Total photocurrent = Jext+JLC
@@ -582,35 +582,32 @@ Calculate LC corrected EQE using procedure from Steiner et al., IEEE PV, v3, p87
 Creates *self.corrEQE*
 
 ### EQE.Jdb(self, TC, Eguess = 1.0, kTfilter=3, dbug=False)
-Calculate Jscs and Egs from *self.corrEQE*
+Calculate detailed-balance `Jdb` (A/cm2) and step-equivalent `Egs` (eV) from *self.corrEQE*
 
-### EQE.Jint(self,  Pspec='global', xspec=wvl)
-Integrate junction currents = integrate (spectra * lambda * EQE(lambda))
+### EQE.Jint(self, *, pairwise=False)
+Integrate corrected junction EQE columns against the spectra loaded via `EQE.add_spectra()` on the union of spectral and EQE wavelength grids (returns mA/cm2)
 
 ### EQE.plot(self, Pspec='global', ispec=0, specname=None, xspec=wvl)
-Plot *self.rawEQE* and *self.corrEQE* on top of a spectrum
+Plot *self.eqe* and *self.corrEQE* on top of a spectrum
 
 ## other qe functions
 
 ### qe.JintMD(EQE, xEQE, Pspec, xspec=wvl)
-*obsolete use EQE.Jint*
-calculate total power of spectra and Jsc of each junction from multi-dimentional EQE
-- integrate multidimentional QE(lambda)(junction) times MD reference spectra Pspec(lambda)(ispec)
+calculate total power of spectra (W/m2) or Jsc of each junction (mA/cm2) from multi-dimensional EQE
+- integrate multidimensional QE(lambda)(junction) times MD reference spectra Pspec(lambda)(ispec) on the union of spectral and EQE wavelength nodes
 - external quantum efficiency QE[unitless] x-units = nm,
 - reference spectra Pspec[W/m2/nm] x-units = nm
 - optionally Pspec as string 'space', 'global', or 'direct'
-- xEQE in nm, can optionally use (start, step) for equally spaced data
+- xEQE in nm, can optionally use (start, stop) for equally spaced or step-EQE bounds
 - default x values for Pspec from wvl
 
 output:
-- Jsc[junc,spectrum] = int(Pspec[spectrum]*EQE[junc]*lambda)
-- total power=int(Pspec) if EQE is None
+- Jsc[spectrum,junc] = int(Pspec[spectrum]*EQE[junc]*lambda) in mA/cm2
+- total power=int(Pspec) in W/m2 if EQE is None
 
 ### qe.JdbMD(EQE, xEQE, TC, Eguess = 1.0, kTfilter=3, bplot=False)
-*obsolte use EQE.Jdb*
-calculate detailed-balance reverse saturation current from EQE vs xEQE
-- xEQE[=]nm
-- can optionally use (start, step) for equally spaced data
+calculate detailed-balance reverse saturation current (A/cm2) and step-equivalent bandgap (eV) from EQE vs xEQE
+- xEQE[=]nm, or (start, stop) for equally spaced data
 - debug on bplot
 
 ### qe.JdbFromEg(TC,Eg,dbsides=1.,method=None)

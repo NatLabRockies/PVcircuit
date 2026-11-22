@@ -83,9 +83,9 @@ class IV3T:
     Units and conventions
     ---------------------
     Device currents (absolute, **not** densities):
-        - Iro, Izo, Ito -- currents flowing out of the R, Z, and T
-          terminals [A]. Kirchhoff requires Iro + Izo + Ito = 0. Convert
-          to density with J = I / area.
+        - Iro, Izo, Ito -- currents flowing into the device from the R, Z,
+          and T terminals to the internal node o [A]. Kirchhoff requires
+          Iro + Izo + Ito = 0. Convert to density with J = I / area.
 
     Device voltages (relative inter-terminal):
         - Vzt, Vrz, Vtr -- inter-terminal voltage differences [V]
@@ -94,7 +94,8 @@ class IV3T:
 
     Load (instrument-frame) variables:
         - VA, VB -- load voltages [V] applied by sources A and B.
-        - IA, IB -- load currents [A]. Negative => power extracted.
+        - IA, IB -- load currents [A]. Load A (B) extracts power from the
+          device when IA * VA < 0 (IB * VB < 0).
 
     Mapping between device and load variables depends on meastype:
 
@@ -111,19 +112,17 @@ class IV3T:
 
     Derived quantities:
         - Ptot -- total output power [W], computed as -IA*VA - IB*VB.
-          Positive values mean the device is delivering power. Undefined
+          Positive values mean the device is delivering net power. Undefined
           points are encoded as the sentinel -100.0 (see Pcalc).
-        - Ixhex/Iyhex, Vxhex/Vyhex -- isometric hex-coordinate
-          projections of the (Iro, Izo, Ito) and (Vzt, Vrz, Vtr) triples,
-          used for hex-grid plots.
+        - Ixhex/Iyhex, Vxhex/Vyhex -- hexagonal coordinate projections of
+          the (Iro, Izo, Ito) and (Vzt, Vrz, Vtr) triples for hex-grid plots.
 
     Other attributes:
-        - area [cm^2] -- nominal device area. **Informational only**:
-          IV3T stores absolute currents and voltages, and none of the
-          coordinate or load conversions in this class read area.
-          External callers (e.g. tandem3T.Tandem3T)
-          may use it to recover current densities via J = I / area,
-          but the value is not synchronised with any device.
+        - area [cm^2] -- nominal device area. Coordinate and load conversions
+          do not read area (only kirchhoff() uses it to scale its absolute
+          current floor). External callers (e.g. tandem3T.Tandem3T) may use it
+          to recover current densities via J = I / area, and the value is not
+          synchronised automatically with any device.
         - meastype -- one of 'CZ', 'CR', 'CT', 'CF'
           (appending an extra character such as 'CZo' swaps the A/B
           load assignment for that measurement).
@@ -587,9 +586,13 @@ class IV3T:
             elif ltwo == 3:  # check
                 array2 = getattr(self, two[2])
                 akirch = array0 + array1 + array2
-                atol = 1e-3 * max(1.0, self.area)
-                for i, kzero in enumerate(akirch.flat):
-                    if not math.isclose(kzero, 0.0, abs_tol=atol):
+                mag = np.abs(array0) + np.abs(array1) + np.abs(array2)
+                if stwo.issubset(set(self.Vdevlist)):
+                    tols = 1e-6 + 1e-9 * mag
+                else:
+                    tols = 1e-6 * mag + 1e-9 * max(float(self.area), 1e-6)
+                for i, (kzero, tol) in enumerate(zip(akirch.flat, tols.flat)):
+                    if not math.isfinite(kzero) or abs(kzero) > float(tol):
                         array0.flat[i] = np.nan
                         array1.flat[i] = np.nan
                         array2.flat[i] = np.nan

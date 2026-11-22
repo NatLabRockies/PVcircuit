@@ -73,14 +73,33 @@ def bc_eqet():
 
 @pytest.fixture(scope="module")
 def meteo(nsrdb_data):
-    wavelength, spectra_df, meteo_df = _load_nsrdb(nsrdb_data, n=10)
-    return Meteo(
+    return _build_nsrdb_meteo(nsrdb_data, n=10)
+
+
+def _build_nsrdb_meteo(nsrdb_data, n=None):
+    """Build a Meteo on the contiguous NSRDB timeline and filter post-construction (no gap bridging)."""
+    wavelength, spectra_full, meteo_full, irradiance = nsrdb_data
+    if n is None:
+        return Meteo(
+            wavelength,
+            spectra_full,
+            meteo_full["Temperature"],
+            meteo_full["Wind Speed"],
+            meteo_full.index,
+        )
+    idx = np.where(irradiance >= 200)[0][:n]
+    # Include at least one trailing step so the last selected row gets its full 1 h weight
+    stop = min(int(idx[-1]) + 2, len(irradiance))
+    full_slice = Meteo(
         wavelength,
-        spectra_df,
-        meteo_df["Temperature"],
-        meteo_df["Wind Speed"],
-        meteo_df.index,
+        spectra_full.iloc[:stop].copy(),
+        meteo_full["Temperature"].iloc[:stop],
+        meteo_full["Wind Speed"].iloc[:stop],
+        meteo_full.index[:stop],
     )
+    mask = np.zeros(stop, dtype=bool)
+    mask[idx] = True
+    return full_slice.filter_custom(mask)
 
 
 @pytest.fixture(scope="module")
@@ -206,8 +225,8 @@ def test_add_currents(tc_eqet, bc_eqet, meteo):
     tc_eqet_copy.add_spectra(wvl, spectra_tiled)
     bc_eqet_copy.add_spectra(wvl, spectra_tiled)
 
-    tc_currents = tc_eqet_copy.get_current_for_temperature(cell_temps, degrees=[1])
-    bc_currents = bc_eqet_copy.get_current_for_temperature(cell_temps, degrees=[1])
+    tc_currents = tc_eqet_copy.get_current_for_temperature(cell_temps)
+    bc_currents = bc_eqet_copy.get_current_for_temperature(cell_temps)
 
     # filter negative
     tc_currents[tc_currents < 0] = 0
@@ -322,14 +341,9 @@ def test_get_current_for_temperature_no_spectra(tc_eqet):
 def _make_full_meteo(nsrdb_data, tc_eqet, bc_eqet, n=10):
     """Build a Meteo with bandgaps and currents populated from NSRDB data."""
 
-    wavelength, spectra_df, meteo_df = _load_nsrdb(nsrdb_data, n=n)
-    ey = Meteo(
-        wavelength,
-        spectra_df,
-        meteo_df["Temperature"],
-        meteo_df["Wind Speed"],
-        meteo_df.index,
-    )
+    ey = _build_nsrdb_meteo(nsrdb_data, n=n)
+    wavelength = ey.wavelength
+    spectra_df = ey.spectra
     cell_temps = ey.cell_temp.to_numpy()  # shape (n,)
 
     tc_eqet_c = copy.deepcopy(tc_eqet)
@@ -340,9 +354,9 @@ def _make_full_meteo(nsrdb_data, tc_eqet, bc_eqet, n=10):
     tc_eqet_c.add_spectra(wavelength, spectra_arr)
     bc_eqet_c.add_spectra(wavelength, spectra_arr)
 
-    # currents -- target temperature array length must match number of spectra columns
-    tc_currents = tc_eqet_c.get_current_for_temperature(cell_temps, degrees=[1])
-    bc_currents = bc_eqet_c.get_current_for_temperature(cell_temps, degrees=[1])
+    # currents -- use the default piecewise-linear J(T) interpolation
+    tc_currents = tc_eqet_c.get_current_for_temperature(cell_temps)
+    bc_currents = bc_eqet_c.get_current_for_temperature(cell_temps)
     tc_currents[tc_currents < 0] = 0
     bc_currents[bc_currents < 0] = 0
     ey.add_currents(tc_currents)
@@ -354,22 +368,20 @@ def _make_full_meteo(nsrdb_data, tc_eqet, bc_eqet, n=10):
     tc_model = TemperatureModel.fit(
         tc_eqet.temperature.astype(float),
         np.array(tc_eqet.calc_Eg_Rau()[0]),
-        model_types=[ModelType.LINEAR],
     )
     bc_model = TemperatureModel.fit(
         bc_eqet.temperature.astype(float),
         np.array(bc_eqet.calc_Eg_Rau()[0]),
-        model_types=[ModelType.LINEAR],
     )
-    ey.add_bandgaps(np.asarray(tc_model.apply(cell_temps, tc_bg25)))
-    ey.add_bandgaps(np.asarray(bc_model.apply(cell_temps, bc_bg25)))
+    ey.add_bandgaps(np.asarray(tc_model.apply(cell_temps, float(tc_bg25[0]))))
+    ey.add_bandgaps(np.asarray(bc_model.apply(cell_temps, float(bc_bg25[0]))))
 
     return ey
 
 
 def test_run_ey_2T(nsrdb_data, tc_eqet, bc_eqet):
     tandem2T = pvc.Multi2T()
-    ey = _make_full_meteo(nsrdb_data, tc_eqet, bc_eqet, n=50)
+    ey = _make_full_meteo(nsrdb_data, tc_eqet, bc_eqet, n=200)
     energy_out, ey_eff = ey.run_ey(tandem2T, "CM", multiprocessing=False)
 
     test_file = _TEST_FILES / "ey_run_2T_CM_n200.txt"
@@ -852,6 +864,55 @@ def test_run_ey_3T_r_type_CM_keeps_Isc3():
     np.testing.assert_allclose(m.results["Isc"].iloc[12], min(abs(isc3.IA[0]), abs(isc3.IB[0])), rtol=1e-9)
 
 
+def test_ey_review_regressions():
+    """Regressions (C33, C37, C38, C39, C50): gapped reindex weights, monotonic checks, APE range, post-run_ey add_sigmas, VMloss ncells."""
+    from pvcircuit.EY import VMloss
+
+    m, irr, t = _synthetic_meteo(ndays=4)
+    _populate(m, irr)
+
+    # C33: reindexing onto a daytime-only (gapped) index preserves per-row dt instead of bridging nights
+    day_mask = irr > 0
+    m_reidx = m.reindex(t[day_mask])
+    m_filt = m.filter_custom(day_mask)
+    np.testing.assert_allclose(m_reidx.energy_in, m_filt.energy_in, rtol=1e-12)
+
+    # C37: reversed timeline raises; descending wavelength is sorted cleanly
+    with pytest.raises(ValueError, match="strictly increasing"):
+        Meteo(m.wavelength, m.spectra, m.temp, m.wind, t[::-1])
+    m_desc = Meteo(m.wavelength[::-1], m.spectra.iloc[:, ::-1], m.temp, m.wind, t)
+    np.testing.assert_allclose(m_desc.irradiance.to_numpy(), m.irradiance.to_numpy(), rtol=1e-12)
+
+    # C38: calc_ape(wavelength_range=...) does not mutate self.wavelength or self.spectra
+    wl_before = m.wavelength.copy()
+    m.calc_ape(wavelength_range=(300.0, 1700.0))
+    np.testing.assert_array_equal(m.wavelength, wl_before)
+    assert np.isfinite(m.average_photon_energy[12])
+
+    # C39: run_ey without sigmas must not block a subsequent add_sigmas() call
+    m.run_ey(pvc.Multi2T(), "CM", multiprocessing=False)
+    assert m.sigmas is None
+    m.add_sigmas(np.full(len(t), 0.015))
+    m.add_sigmas(np.full(len(t), 0.012))
+    e_sig, _ = m.run_ey(pvc.Multi2T(), "CM", multiprocessing=False)
+    assert e_sig > 0.0
+
+    # C50: VMloss rejects ncells <= 0
+    with pytest.raises(ValueError, match="ncells"):
+        VMloss(pvc.Tandem3T(), "VM-21-s", 0)
+
+
+def test_filter_ape_range_keeps_stored_ape():
+    """Regression (K07): filter_ape(wavelength_range=...) must not overwrite the stored full-range APE."""
+    t = pd.date_range("2021-06-01 10:00", periods=4, freq="h")
+    spectra = pd.DataFrame(np.vstack([AM15G * f for f in (0.5, 0.8, 1.0, 0.7)]))
+    m = Meteo(wvl, spectra, pd.Series(np.full(4, 20.0)), pd.Series(np.full(4, 1.0)), t)
+    assert len(m.filter_ape(1.40, 1.50).datetime) == 4  # AM1.5G over 280-4000 nm: 1.450 eV
+    assert len(m.filter_ape(1.55, 1.65, wavelength_range=(300.0, 1700.0)).datetime) == 4  # 1.602 eV
+    np.testing.assert_allclose(m.average_photon_energy, 1.450, atol=5e-3)
+    assert len(m.filter_ape(1.40, 1.50).datetime) == 4
+
+
 #################################################
 # run_ey solves all timesteps at once (the *_rows methods of the device)
 #################################################
@@ -1133,15 +1194,7 @@ def generate_test_files():
     tc_eqet = _load_tc_eqet()
     bc_eqet = _load_bc_eqet()
     nsrdb_data = _load_nsrdb_raw()
-
-    wavelength, spectra_df, meteo_df = _load_nsrdb(nsrdb_data, n=10)
-    meteo = Meteo(
-        wavelength,
-        spectra_df,
-        meteo_df["Temperature"],
-        meteo_df["Wind Speed"],
-        meteo_df.index,
-    )
+    meteo = _build_nsrdb_meteo(nsrdb_data, n=10)
 
     print("Generating ey_add_bandgaps.txt...")
     test_add_bandgaps(tc_eqet, bc_eqet, meteo)

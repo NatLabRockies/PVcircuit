@@ -505,6 +505,64 @@ def test_specialpoints_current_mismatched(top, bot):
     np.testing.assert_allclose(point.Iro[0], -point.Ito[0])
 
 
+def test_tandem3T_review_regressions():
+    """Regressions (C42, C43, C45, C46, C47, C48): 3T efficiency, high-Rz MPP_rows, r-type CM, VtrIzo polarity, sentinel/NaN, Brent fallback."""
+    # C42: 3T efficiency >= 2T efficiency on default and photon-conserving tandems
+    d = Tandem3T()
+    assert d.efficiency() > Multi2T.from_3T(d).efficiency()
+
+    # C47: resistor-only junction returns nan efficiency (not -999.5), and NaN Jext in MPP() does not raise NameError
+    d_res = Tandem3T()
+    d_res.top.set(pn=0, Rser=0.0)
+    assert np.isnan(d_res.efficiency())
+    d_nan = Tandem3T()
+    d_nan.top.set(Jext=np.nan)
+    pt_nan = d_nan.MPP()
+    assert np.isnan(pt_nan.Iro[0])
+
+    # C43: near-floating Z contact (Rz = 1e5) in MPP_rows meets the 2T series bound
+    d_hi = Tandem3T()
+    d_hi.top.set(Jext=0.030, J0ratio=[16.0, 10.0])
+    d_hi.bot.set(Jext=0.014)
+    d_hi.set(Rz=1e5)
+    p_series = Multi2T.from_3T(d_hi).MPP_rows([25.0], [[1.8, 1.4]], 0.0, [[0.030, 0.014]])["Pmp"][0]
+    p_3t = d_hi.MPP_rows([25.0], [[1.8, 1.4]], 0.0, [[0.030, 0.014]]).Ptot[0]
+    assert p_3t >= p_series * (1.0 - 1e-9)
+
+    # C45: bottom-rich r-type CM() finds positive power on the top-generating branch
+    d_rt = Tandem3T(pn=[-1, -1])
+    d_rt.top.set(Jext=0.014)
+    d_rt.bot.set(Jext=0.020)
+    _, cm_mpp = d_rt.CM()
+    assert cm_mpp.Ptot[0] > 3e-3
+
+    # C46: reversed-polarity s-type pn = [+1, -1] VI0('VtrIzo') gives Vtr = 0 short-circuit
+    d_rev = Tandem3T(pn=[1, -1])
+    d_rev.set(Gsh=1e-3)
+    pt_vtr = d_rev.VI0("VtrIzo")
+    assert abs(pt_vtr.Vtr[0]) < 1e-9
+    assert pt_vtr.Iro[0] > 0.0 and pt_vtr.Ito[0] < 0.0
+
+    # C48: small-Rz Brent fallback satisfies KCL tightly and restores Rz/Rser on error
+    d_fb = Tandem3T(Rz=1e-3)
+    iv = IV3T(name="fb", meastype="CZ", shape=1)
+    iv.set(Vzt=0.8, Vrz=0.5, Vtr=-1.3)
+    d_fb._i3t_brent_fallback(iv)
+    assert abs(iv.Iro[0] + iv.Izo[0] + iv.Ito[0]) < 1e-10
+
+
+def test_cm_soft_breakdown_finds_global_maximum():
+    """Regression (K03): CM() with a soft breakdown in the limiting junction must not stop on the lower power lobe."""
+    dev = Tandem3T(Eg_list=[1.8, 0.74])
+    dev.top.set(Jext=0.020)
+    dev.bot.set(Jext=0.004, RBB="JFG")
+    dev.bot.set(J0rb=12.0)
+    d2 = Multi2T.from_3T(dev)
+    current = np.linspace(0.0, d2.Isc(), 20001)
+    p_dense = float(np.nanmax(current * d2.V2T(-current)))
+    assert dev.CM()[1].Ptot[0] == pytest.approx(p_dense, rel=1e-6)
+
+
 def generate_test_files():
     """Generate all baseline test files. Run: python tests/test_tandem3T.py"""
     global REGENERATE_TEST_FILES

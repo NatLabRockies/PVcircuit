@@ -464,6 +464,66 @@ def test_I2T_negative_photocurrent_on_a_shunted_junction():
     np.testing.assert_allclose(dev.MPP()["Isc"], 0.003955882274302504, rtol=1e-9)
 
 
+def test_mixed_diode_counts_and_nested_set():
+    """Regression (C19, C26): junctions with different diode counts work in Imaxrev, I2Troot, legacy solver, and nested set."""
+    dev = Multi2T()
+    dev.set(n=[[1.0], [1.0, 2.0]], J0ratio=[[10.0], [10.0, 10.0]])
+    assert dev.j[0].n.size == 1 and dev.j[1].n.size == 2
+
+    padded = Multi2T()
+    padded.j[0].set(n=[1.0, 2.0], J0ratio=[10.0, 0.0])
+
+    assert dev.Imaxrev() == pytest.approx(padded.Imaxrev())
+    assert dev.I2Troot(0.5) == pytest.approx(padded.I2Troot(0.5), rel=1e-12)
+    with _Solver("legacy"):
+        assert dev.MPP()["Pmp"] == pytest.approx(padded.MPP()["Pmp"], rel=1e-12)
+
+    # 0-d numpy scalar works; wrong-length sequence raises
+    dev.set(TC=np.array(30.0))
+    assert dev.TC == 30.0
+    with pytest.raises(ValueError, match="length"):
+        dev.set(Jext=[0.01, 0.02, 0.03])
+
+
+def test_reverse_bias_beyond_10V_on_shunted_stack():
+    """Regression (C20): shunted limiting junction needing < -10 V must not clamp at -10 V."""
+    dev = Multi2T(Eg_list=[1.8, 1.4])
+    dev.j[0].set(Jext=0.010, Gsh=1e-3)
+    dev.j[1].set(Jext=0.020, Gsh=1e-3)
+    cur = dev.I2T(np.array([-12.0, -15.0, -20.0]))
+    assert cur[0] > cur[1] > cur[2]
+    np.testing.assert_allclose(dev.V2T(cur), [-12.0, -15.0, -20.0], atol=1e-8)
+
+
+def test_bimodal_breakdown_mpp_selects_global_maximum():
+    """Regression (C18): breakdown-limited 4J with bimodal P(I) must pick the higher knee lobe."""
+    dev = Multi2T(Eg_list=[1.83, 1.40, 1.05, 0.74], n=[1.0, 2.0], J0ratio=[20.0, 10.0], Rs2T=0.5)
+    for idx, junc in enumerate(dev.j):
+        junc.set(Jext=0.014824575795016101, beta=0.0 if idx == 0 else 5.0)
+    dev.j[3].set(Gsh=1e-3, RBB="JFG")
+    dev.j[3].set(mrb=20.95632537311681, J0rb=7.7726425086408195, Vrb=0.0)
+    dev.j[3].set(Jext=0.014824575795016101 * 0.785)
+
+    I_dense = np.linspace(-dev.Isc(), 0.0, 4001)
+    P_ref = float(np.nanmax(-dev.V2T(I_dense) * I_dense))
+    assert dev.MPP()["Pmp"] == pytest.approx(P_ref, rel=1e-5)
+    rows_pmp = dev.MPP_rows([25.0], [[j.Eg for j in dev.j]], 0.0, [[j.Jext for j in dev.j]])["Pmp"][0]
+    assert rows_pmp == pytest.approx(P_ref, rel=1e-5)
+
+
+def test_efficiency_am0_and_invalid_key():
+    """Regression (C04, C26, K08): efficiency('space') uses 1366.1 W/m^2, also with an explicit grid; unknown keys raise ValueError."""
+    dev = Multi2T()
+    pmp = dev.MPP()["Pmp"]
+    np.testing.assert_allclose(dev.efficiency("space"), pmp / (0.13661 * dev.totalarea), rtol=1e-12)
+    np.testing.assert_allclose(dev.efficiency("space", Pin=1361.0), pmp / (0.1361 * dev.totalarea), rtol=1e-12)
+    np.testing.assert_allclose(dev.efficiency("space", pvc.qe.wvl), dev.efficiency("space"), rtol=1e-12)
+    dev3 = Tandem3T()
+    np.testing.assert_allclose(dev3.efficiency("space", pvc.qe.wvl), dev3.efficiency("space"), rtol=1e-12)
+    with pytest.raises(ValueError, match="Unknown reference spectrum"):
+        dev.efficiency("AM1.5G")
+
+
 def test_MPP_negative_photocurrent_on_an_unshunted_junction():
     """Isc is the floor of the vertical branch, but no point of the scan [-Isc, 0] has a finite power.
 

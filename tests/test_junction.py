@@ -513,6 +513,96 @@ def test_solver_state_rows_evaluates_a_subclass_through_its_own_J0():
     np.testing.assert_allclose(rows["J0"], 3.0 * plain["J0"], rtol=1e-13)
 
 
+def test_integer_diode_inputs_are_cast_to_float64():
+    """Regression (C25): integer n / J0ratio lists must not create int arrays that truncate indexed updates."""
+    dev = Multi2T()
+    assert dev.j[0].n.dtype == np.float64
+    assert dev.j[0].J0ratio.dtype == np.float64
+    dev.j[0].set(**{"n[1]": 1.6, "J0ratio[0]": 0.316})
+    np.testing.assert_allclose(dev.j[0].n, [1.0, 1.6])
+    np.testing.assert_allclose(dev.j[0].J0ratio, [0.316, 10.0])
+
+    junc = pvc.junction.Junction(n=[1, 2], J0default=0.5)
+    np.testing.assert_allclose(junc.J0ratio, [0.5, 0.5])
+    assert not junc.notdiode()
+
+
+def test_wide_gap_junction_voc_above_3V():
+    """Regression (C21): single junction with Voc > 3 V (Eg = 3.6 eV) must solve cleanly."""
+    junc = pvc.junction.Junction(Eg=3.6, n=[1.0], J0ratio=[1.0], Jext=0.001)
+    voc = junc.Vdiode(0.0)
+    assert np.isfinite(voc) and voc > 3.0
+    dev = Multi2T.from_single_junction(junc)
+    mpp = dev.MPP()
+    assert np.isfinite(mpp["Voc"]) and np.isfinite(mpp["Pmp"]) and mpp["Voc"] > 3.0
+
+
+def test_log_newton_no_false_convergence_near_shunt_line():
+    """Regression (C22): reverse current where S(Jtot/Gsh) ~ 0+ must not false-converge on log step."""
+    j1 = pvc.junction.Junction(Eg=1.1, n=[2.0], J0ref=[1e-6], Gsh=1e-9, Jext=0.0)
+    j2 = pvc.junction.Junction(Eg=1.1, n=[1.0, 2.0], J0ratio=[10.0, 10.0], Gsh=1e-9, Jext=0.0)
+    for junc, jtot in ((j1, -9.810882799788192e-7), (j2, -float(j2.J0.sum()) * 0.999999999999)):
+        fast_scalar = junc._vdiode_arr(np.array([jtot]))[0]
+        fast_array = junc._vdiode_arr(np.full(150, jtot))[0]
+        with _Solver("legacy"):
+            ref = junc._vdiode_arr(np.array([jtot]))[0]
+        np.testing.assert_allclose(fast_scalar, ref, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(fast_array, ref, rtol=0, atol=1e-10)
+
+
+def test_junction_validation_and_readonly_properties():
+    """Regression (C24, C26, C28, C30): invalid physical bounds and read-only properties raise or warn."""
+    junc = pvc.junction.Junction()
+    for bad_kw in ({"Gsh": -1e-4}, {"sigma": -0.01}, {"totalarea": 0.0}, {"J0ratio": [-1.0, 10.0]}):
+        with pytest.raises(ValueError):
+            junc.set(**bad_kw)
+    for ro_key in ("Jphoto", "TK", "Jdb"):
+        with pytest.raises(ValueError, match="invalid class attribute"):
+            junc.set(**{ro_key: 1.0})
+
+    # C28: theta=1 with sigma > Vth (~45 meV, a-Si-like) warns even on repeated cached calls
+    for _ in range(2):
+        with pytest.warns(UserWarning, match="unphysical"):
+            pvc.junction.Jdb(25.0, 1.75, sigma=0.045, theta=1.0)
+    # C30: theta=2 with sigma^2 > 0.5*Eg*Vth warns
+    with pytest.warns(UserWarning, match="unphysical"):
+        pvc.junction.Jdb(25.0, 1.12, sigma=0.20, theta=2.0)
+
+
+def test_bishop_positive_vrb_and_atomic_set():
+    """Regressions (K02, K04): Bishop breakdown with Vrb > 0 solves up to -Vrb; a rejected set() changes nothing."""
+    # K02: the voltage bracket must end above the Bishop singularity at V = -Vrb (both solvers)
+    junc = pvc.junction.Junction(Eg=1.4, Jext=0.02, Gsh=1e-3, RBB="bishop")
+    junc.set(Vrb=15.0)
+    ref = pvc.junction.Junction(Eg=1.4, Jext=0.02, Gsh=1e-3)
+    for solver in ("fast", "legacy"):
+        with _Solver(solver):
+            np.testing.assert_allclose(junc.Vdiode(0.01), ref.Vdiode(0.01), atol=1e-9)
+            vbd = junc._vdiode_arr(np.array([-1.0]))[0]
+        assert -15.0 < vbd < -10.0
+        np.testing.assert_allclose(junc.JshuntRBB(vbd) + junc.Jmultidiodes(vbd), -1.0, rtol=1e-6)
+
+    # K04: a rejected value is rolled back and does not block later updates
+    junc = pvc.junction.Junction()
+    eg0 = junc.Eg
+    with pytest.raises(ValueError, match="Gsh"):
+        junc.set(Eg=1.5, Gsh=-1e-4)
+    assert junc.Gsh == 0.0 and junc.Eg == eg0
+    junc.Gsh = -1e-4  # direct assignment bypasses set(); later set() calls must still work
+    junc.set(Eg=1.5)
+    assert junc.Eg == 1.5
+
+    dev = Multi2T()
+    with pytest.raises(ValueError, match="Gsh"):
+        dev.set(Gsh=[1e-4, -1e-4])
+    assert [j.Gsh for j in dev.j] == [0.0, 0.0]
+    dev3 = pvc.tandem3T.Tandem3T()
+    with pytest.raises(ValueError, match="Gsh"):
+        dev3.set(Gsh=[1e-4, -1e-4])
+    assert dev3.top.Gsh == 0.0 and dev3.bot.Gsh == 0.0
+
+
+
 def test_solver_setting():
     """The Newton solver is the default; "legacy" selects the Brent root finders; anything else raises."""
     assert pvc.junction.SOLVER == "fast"

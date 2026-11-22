@@ -16,10 +16,13 @@ from tqdm import tqdm
 import pvcircuit as pvc
 from pvcircuit import junction
 
-# Below this upper wavelength bound the integrated spectra can no longer be
-# regarded as broadband plane-of-array irradiance (AM1.5G carries ~5 % of its
-# power above 2500 nm) -- cell temperature and energy_in would be biased.
+# Below this upper wavelength bound (or above _MAX_UV_START_WAVELENGTH_NM) the
+# integrated spectra omit part of the broadband plane-of-array irradiance
+# (AM1.5G carries ~0.78 % of its power above 2500 nm, ~5.5 % above 1700 nm, and
+# ~1.4 % below 350 nm) -- cell temperature and energy_in would be biased unless
+# broadband poa_irradiance is supplied.
 _MIN_BROADBAND_WAVELENGTH_NM = 2500.0
+_MAX_UV_START_WAVELENGTH_NM = 300.0
 
 # Timesteps solved per call of a *_rows method in run_ey; bounds the size of the work arrays.
 _ROWS_PER_CALL = 20000
@@ -40,6 +43,9 @@ def VMloss(model: Union["pvc.Tandem3T", "pvc.Multi2T"], oper: str, ncells: int) 
     Returns:
         float: The calculated voltage mismatch loss factor.
     """
+    if ncells <= 0:
+        raise ValueError(f"VMloss requires ncells >= 1, got {ncells}")
+
     if isinstance(model, pvc.Multi2T):  # Multi2T or current matched 2-junction tandem
         return 1
 
@@ -347,40 +353,92 @@ class Meteo:
     """
     Handles meteorological environmental data and spectral information for energy yield simulations.
 
-    NOTE: All arrays in this class are handled so that each row aligns with a timestamp.
-    For instance, any EQE array is assumed to correspond to the same timestamps as this data,
-    and each row represents EQE values for that specific time index.
+    NOTE: Construct 'Meteo' on a complete, strictly increasing timeline (retain
+    night rows and pass missing measurements as NaN rows rather than dropping
+    them beforehand, otherwise trapezoid weights bridge the missing intervals).
+    Use 'filter_custom', 'filter_ape', or 'filter_spectra' *after* construction
+    to select rows while preserving their original integration weights 'dt'.
 
-    Row-aligned attributes: ``datetime``, ``temp``, ``wind``, ``spectra``, ``irradiance``,
-    ``cell_temp``, ``dt`` (integration weight per row [s]), ``average_photon_energy``,
-    ``jscs``, ``bandgaps``, ``sigmas`` and, after :meth:`run_ey`, ``results``.
+    Row-aligned attributes: 'datetime', 'temp', 'wind', 'spectra', 'irradiance',
+    'cell_temp', 'dt' (integration weight per row [s]), 'average_photon_energy',
+    'jscs', 'bandgaps', 'sigmas' and, after 'run_ey', 'results'.
 
-    Time integration (``energy_in``, energy yield) uses the per-row weights ``dt``
-    (trapezoid weights of the original timeline). They are kept when rows are
-    filtered, so filtered copies integrate only the rows they contain.
+    Time integration ('energy_in' and energy yield from 'run_ey') integrates over
+    the covered period in [kWh/m^2] (equal to [kWh/m^2/yr] for a one-year record).
 
     Non-finite spectral entries are replaced by 0 (a partially missing spectrum
     still contributes its remaining bands to the irradiance). Timestamps with
     non-finite ambient temperature or wind are retained with a non-finite cell
-    temperature; :meth:`run_ey` assigns zero output to those rows. Feed the
-    *filled* spectra (``Meteo.spectra``, ``Meteo.wavelength``) to
-    :meth:`EQE.add_spectra` so that the Jsc time series stays aligned with
-    ``cell_temp``.
+    temperature; 'run_ey' assigns zero output to those rows while keeping their
+    irradiance in 'energy_in'. Feed the *filled* spectra ('Meteo.spectra',
+    'Meteo.wavelength') to 'EQE.add_spectra' so that the Jsc time series stays
+    aligned with 'cell_temp'.
     """
 
-    def __init__(self, wavelength: np.ndarray, spectra: pd.DataFrame, ambient_temperature: pd.Series, wind: pd.Series, datetime: pd.DatetimeIndex) -> None:
+    def __init__(
+        self,
+        wavelength: np.ndarray,
+        spectra: pd.DataFrame,
+        ambient_temperature: pd.Series,
+        wind: pd.Series,
+        datetime: pd.DatetimeIndex,
+        poa_irradiance: pd.Series | np.ndarray | None = None,
+    ) -> None:
         wavelength = np.asarray(wavelength, dtype=np.float64).flatten()
-        spectra = pd.DataFrame(spectra)
-        ambient_temperature = pd.Series(np.asarray(ambient_temperature, dtype=np.float64))
-        wind = pd.Series(np.asarray(wind, dtype=np.float64))
         datetime = pd.DatetimeIndex(datetime)
-
         nrows = len(datetime)
+
+        if nrows >= 2:
+            dt_secs = (datetime - datetime[0]).total_seconds().to_numpy(dtype=np.float64)
+            gaps = np.diff(dt_secs)
+            if np.any(gaps <= 0.0):
+                raise ValueError("Meteo: datetime index must be strictly increasing")
+            if nrows >= 3:
+                med_gap = float(np.median(gaps))
+                max_gap = float(gaps.max())
+                if med_gap > 0.0 and max_gap > 2.0 * med_gap:
+                    logger.warning(
+                        "Meteo: timeline contains gaps up to {:.2f} h (median step {:.2f} h); trapezoid weights bridge across dropped rows. Pass a complete timeline (using NaN for missing rows) or filter after Meteo() construction.",
+                        max_gap / 3600.0,
+                        med_gap / 3600.0,
+                    )
+        elif nrows == 1:
+            logger.warning("Meteo: initialized with a single timestamp; integration weight dt is 0 s (energy_in and yield will be 0).")
+
+        def _align_series(val, label: str) -> pd.Series:
+            if isinstance(val, pd.Series) and isinstance(val.index, pd.DatetimeIndex) and len(val) == nrows and not val.index.equals(datetime):
+                if len(val.index.unique()) == nrows and set(val.index) == set(datetime):
+                    logger.warning("Meteo: realigning {} on its DatetimeIndex to match datetime", label)
+                    val = val.reindex(datetime)
+                else:
+                    logger.warning("Meteo: {} DatetimeIndex differs from datetime; aligning positionally", label)
+            return pd.Series(np.asarray(val, dtype=np.float64))
+
+        if isinstance(spectra, pd.DataFrame) and isinstance(spectra.index, pd.DatetimeIndex) and spectra.shape[0] == nrows and not spectra.index.equals(datetime):
+            if len(spectra.index.unique()) == nrows and set(spectra.index) == set(datetime):
+                logger.warning("Meteo: realigning spectra on its DatetimeIndex to match datetime")
+                spectra = spectra.reindex(datetime)
+            else:
+                logger.warning("Meteo: spectra DatetimeIndex differs from datetime; aligning positionally")
+        spectra = pd.DataFrame(spectra).copy()
+        ambient_temperature = _align_series(ambient_temperature, "ambient_temperature")
+        wind = _align_series(wind, "wind")
+
         for name, length in (("spectra", spectra.shape[0]), ("ambient_temperature", len(ambient_temperature)), ("wind", len(wind))):
             if length != nrows:
                 raise ValueError(f"Meteo: {name} has {length} rows but datetime has {nrows} entries; all inputs must be row-aligned")
+        if len(wavelength) < 2:
+            raise ValueError("Meteo: wavelength must have at least 2 entries")
         if spectra.shape[1] != len(wavelength):
             raise ValueError(f"Meteo: spectra has {spectra.shape[1]} columns but wavelength has {len(wavelength)} entries; spectra must be (n_times, n_wavelengths)")
+
+        if not np.all(np.diff(wavelength) > 0.0):
+            if np.any(np.diff(np.sort(wavelength)) == 0.0):
+                raise ValueError("Meteo: wavelength contains duplicate entries")
+            logger.warning("Meteo: sorting non-ascending wavelength axis")
+            wl_order = np.argsort(wavelength, kind="stable")
+            wavelength = wavelength[wl_order]
+            spectra = spectra.iloc[:, wl_order]
 
         # Retain the complete timeline. Missing spectral bands carry no power,
         # and rows lacking weather inputs are made explicit zero-output rows by
@@ -409,14 +467,29 @@ class Meteo:
         self.wavelength = wavelength
         self.spectra = spectra
 
-        if wavelength.max() < _MIN_BROADBAND_WAVELENGTH_NM:
+        if poa_irradiance is None:
+            if wavelength.max() <= _MIN_BROADBAND_WAVELENGTH_NM or wavelength.min() > _MAX_UV_START_WAVELENGTH_NM:
+                logger.warning(
+                    "Meteo: spectra cover [{:.0f}, {:.0f}] nm rather than full broadband (~280-4000 nm). Irradiance (cell temperature) and energy_in are integrated over the given range only unless poa_irradiance is supplied.",
+                    wavelength.min(),
+                    wavelength.max(),
+                )
+            irr_vals = trapezoid(y=self.spectra.to_numpy(), x=self.wavelength)
+        else:
+            poa_s = _align_series(poa_irradiance, "poa_irradiance")
+            if len(poa_s) != nrows:
+                raise ValueError(f"Meteo: poa_irradiance has {len(poa_s)} entries, expected {nrows}")
+            irr_vals = poa_s.to_numpy(dtype=np.float64)
+
+        fin_irr = irr_vals[np.isfinite(irr_vals)]
+        if fin_irr.size and (np.any(fin_irr < -1.0) or np.any(fin_irr > 1600.0)):
             logger.warning(
-                "Meteo: spectra only extend to {:.0f} nm. Irradiance (cell temperature) and energy_in are integrated over the given range only; pass broadband spectra (~280-4000 nm) for a correct energy harvesting efficiency.",
-                wavelength.max(),
+                "Meteo: integrated irradiance [{:.1f}, {:.1f}] W/m^2 is outside expected solar bounds [0, 1600] W/m^2; check spectral units (expected W/m^2/nm).",
+                float(fin_irr.min()),
+                float(fin_irr.max()),
             )
 
-        # Calculate irradiance from spectral proxy data
-        self.irradiance = pd.Series(trapezoid(y=self.spectra.to_numpy(), x=self.wavelength), index=self.datetime)  # Optical power of each spectrum [W/m^2]
+        self.irradiance = pd.Series(irr_vals, index=self.datetime)  # Optical power of each spectrum [W/m^2]
         cell_temp = np.asarray(
             sandia_T(self.irradiance.to_numpy(), self.wind.to_numpy(), self.temp.to_numpy()),
             dtype=np.float64,
@@ -436,7 +509,7 @@ class Meteo:
         self.sigmas = None  # Sigma values
         self.results: pd.DataFrame | None = None
 
-    def _add_array(self, array: np.ndarray, attribute_name: str) -> None:
+    def _add_array(self, array: np.ndarray | pd.Series | pd.DataFrame, attribute_name: str) -> None:
         """
         Helper function to add data arrays (e.g., jsc, bandgap, sigma) to the instance.
 
@@ -444,29 +517,45 @@ class Meteo:
             array (np.ndarray): Array to add.
             attribute_name (str): Name of the attribute to which the array will be added.
         """
-        array = np.asarray(array, dtype=np.float64)
+        method_label = "add_" + {"jscs": "currents", "bandgaps": "bandgaps", "sigmas": "sigmas"}.get(attribute_name, attribute_name)
+        nrows = self.cell_temp.shape[0]
+        if isinstance(array, (pd.Series, pd.DataFrame)) and isinstance(array.index, pd.DatetimeIndex) and len(array) == nrows and not array.index.equals(self.datetime):
+            if len(array.index.unique()) == nrows and set(array.index) == set(self.datetime):
+                logger.warning("Meteo.{}: realigning input on its DatetimeIndex to match datetime", method_label)
+                array = array.reindex(self.datetime)
+            else:
+                logger.warning("Meteo.{}: input DatetimeIndex differs from datetime; aligning positionally", method_label)
+
+        arr = np.asarray(array, dtype=np.float64)
         # Ensure the array is columnar and matches the number of rows in cell_temp
-        if array.ndim == 1:
-            array = array[:, np.newaxis]
-        elif array.shape[1] == self.cell_temp.shape[0] and array.shape[0] == 1:
-            array = array.T
+        if arr.ndim == 1:
+            arr = arr[:, np.newaxis]
+        elif arr.shape[1] == nrows and arr.shape[0] == 1:
+            arr = arr.T
+        elif arr.ndim == 2 and arr.shape[0] == arr.shape[1] == nrows and nrows > 1:
+            logger.warning(
+                "Meteo.{}: square ({}, {}) input interpreted as (n_times, n_junctions); note that EQE.Jint() returns (n_junctions, n_times) and requires .T",
+                method_label,
+                nrows,
+                nrows,
+            )
 
-        if array.shape[0] != self.cell_temp.shape[0]:
-            raise ValueError(f"Shape of data {array.shape} does not match cell_temp rows {self.cell_temp.shape[0]}")
+        if arr.shape[0] != nrows:
+            raise ValueError(f"Shape of data {arr.shape} does not match cell_temp rows {nrows}")
 
-        if not np.all(np.isfinite(array)):
+        if not np.all(np.isfinite(arr)):
             logger.warning(
                 "Meteo.{}: {} of {} rows contain non-finite values; those timesteps will yield zero output in run_ey",
-                "add_" + {"jscs": "currents", "bandgaps": "bandgaps", "sigmas": "sigmas"}.get(attribute_name, attribute_name),
-                int((~np.isfinite(array)).any(axis=1).sum()),
-                array.shape[0],
+                method_label,
+                int((~np.isfinite(arr)).any(axis=1).sum()),
+                arr.shape[0],
             )
 
         current_attr = getattr(self, attribute_name)
         if current_attr is None:
-            setattr(self, attribute_name, array)
+            setattr(self, attribute_name, arr)
         else:
-            setattr(self, attribute_name, np.concatenate((current_attr, array), axis=1))
+            setattr(self, attribute_name, np.concatenate((current_attr, arr), axis=1))
 
     def add_currents(self, jsc: np.ndarray) -> None:
         """
@@ -540,22 +629,25 @@ class Meteo:
                 junctions of ``model``.
 
         Returns:
-            Tuple[float, float]: A tuple containing energy yield [kWh/m^2/yr] and energy harvesting efficiency.
+            Tuple[float, float]: Integrated energy yield [kWh/m^2] over the covered
+                Meteo period (i.e. [kWh/m^2/yr] for a one-year record) and energy
+                harvesting efficiency 'EnergyOut / energy_in' (note: zero-output
+                rows with non-finite weather/Jsc/Eg/sigma keep their irradiance in
+                'energy_in', lowering efficiency by their irradiance share).
         """
         if self.jscs is None or self.bandgaps is None:
             raise ValueError("run_ey: add_currents() and add_bandgaps() must be called before run_ey()")
 
-        # If sigma values are not provided, initialize them to zero
-        if self.sigmas is None:
-            self.sigmas = np.zeros_like(self.bandgaps)
+        # Use a local zero array when sigmas were not added so self.sigmas stays None
+        # for any later add_sigmas() calls on this Meteo instance.
+        sigmas_arr = np.zeros_like(self.bandgaps) if self.sigmas is None else self.sigmas
 
         assert self.jscs is not None
         assert self.bandgaps is not None
-        assert self.sigmas is not None
 
         # Ensure all data arrays have consistent shapes
         njuncs = self._model_njuncs(model)
-        for name, attr in (("jscs", self.jscs), ("bandgaps", self.bandgaps), ("sigmas", self.sigmas)):
+        for name, attr in (("jscs", self.jscs), ("bandgaps", self.bandgaps), ("sigmas", sigmas_arr)):
             if attr.shape[0] != self.cell_temp.shape[0]:
                 raise ValueError(f"Inconsistent array size: {name} has {attr.shape[0]} rows, expected {self.cell_temp.shape[0]}")
             if attr.shape[1] != njuncs:
@@ -592,7 +684,7 @@ class Meteo:
                 result_dfs = []
                 for start in range(0, len(chunk_ids), _ROWS_PER_CALL):
                     chunk = chunk_ids[start : start + _ROWS_PER_CALL]
-                    result_dfs.append(_calc_yield_rows(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], model, oper))
+                    result_dfs.append(_calc_yield_rows(self.jscs[chunk], self.bandgaps[chunk], sigmas_arr[chunk], self.cell_temp.iloc[chunk], model, oper))
                     pbar.update(len(chunk))
                     pbar.refresh()
 
@@ -603,9 +695,8 @@ class Meteo:
 
                 with mp.Pool(cpu_count, initializer=_set_solver, initargs=(junction.SOLVER,)) as pool:
                     # Assign tasks to multiprocessing pool
-                    # For multiprocessing
                     jobs = [
-                        pool.apply_async(_calc_yield_async, args=(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], copy.deepcopy(model), oper), callback=update_tqdm)
+                        pool.apply_async(_calc_yield_async, args=(self.jscs[chunk], self.bandgaps[chunk], sigmas_arr[chunk], self.cell_temp.iloc[chunk], copy.deepcopy(model), oper), callback=update_tqdm)
                         for chunk in chunks
                     ]
                     # Collect and combine dataframe results
@@ -618,7 +709,7 @@ class Meteo:
                 result_dfs = []
                 for i, chunk in enumerate(chunks):
                     # Process each chunk sequentially
-                    chunk_result = _calc_yield_async(self.jscs[chunk], self.bandgaps[chunk], self.sigmas[chunk], self.cell_temp.iloc[chunk], copy.deepcopy(model), oper)
+                    chunk_result = _calc_yield_async(self.jscs[chunk], self.bandgaps[chunk], sigmas_arr[chunk], self.cell_temp.iloc[chunk], copy.deepcopy(model), oper)
                     result_dfs.append(chunk_result)
                     pbar.update(len(chunk))
                     pbar.refresh()
@@ -640,36 +731,53 @@ class Meteo:
 
         # Weighted sum with the per-row time weights (== trapezoid on the
         # unfiltered timeline; robust against filtered/irregular rows).
-        EnergyOut = float(np.sum(power_density * self.dt.to_numpy()))  # [Ws/cm^2/yr]
+        EnergyOut = float(np.sum(power_density * self.dt.to_numpy()))  # [Ws/cm^2] over period
 
         # Unit conversion breakdown for the factor /3.6e3 /1e3 *1e4:
         #   /3600  : seconds -> hours      (Ws -> Wh)
         #   /1000  : W -> kW               (Wh -> kWh)
-        #   *1e4   : cm^-2 -> m^-2            (per-cm^2 -> per-m^2, since 1 m^2 = 1e4 cm^2)
-        EnergyOut = EnergyOut / 3.6e3 / 1e3 * 1e4  # [Ws/cm^2/yr] --> [kWh/m^2/yr]
+        #   *1e4   : cm^-2 -> m^-2         (per-cm^2 -> per-m^2, since 1 m^2 = 1e4 cm^2)
+        EnergyOut = EnergyOut / 3.6e3 / 1e3 * 1e4  # [Ws/cm^2] --> [kWh/m^2] over period
 
         # Calculate energy harvesting efficiency
         EYeff = EnergyOut / self.energy_in if self.energy_in > 0 else np.nan
         return EnergyOut, EYeff
 
-    def calc_ape(self) -> None:
+    def calc_ape(self, wavelength_range: tuple[float, float] | None = None) -> None:
+        """Calculate the average photon energy (APE) [eV] of the spectra.
+
+        Note: APE depends strongly on the spectral wavelength bounds (e.g. AM1.5G
+        is 1.450 eV over 280-4000 nm vs 1.602 eV over 300-1700 nm). Pass
+        'wavelength_range=(wl_min, wl_max)' [nm] to evaluate APE over a specific
+        band without mutating 'self.wavelength' or 'self.spectra'. The result is
+        stored in 'self.average_photon_energy'.
         """
-        Calculate the average photon energy (APE) of the spectra.
-        """
-        # Calculate photon flux
-        phi = self.spectra * (self.wavelength * 1e-9) / constants.h / constants.c
-        # Identify and mask rows where all photon flux values are zero
-        mask = (phi == 0).all(axis=1)
-        phi[mask] = np.nan
-        # Compute average photon energy
-        self.average_photon_energy = trapezoid(x=self.wavelength, y=self.spectra.values) / constants.e / trapezoid(x=self.wavelength, y=phi.values)
+        self.average_photon_energy = self._compute_ape(wavelength_range)
+
+    def _compute_ape(self, wavelength_range: tuple[float, float] | None = None) -> np.ndarray:
+        """[eV] average photon energy of every row over 'wavelength_range' [nm] (default: all wavelengths)."""
+        wl = self.wavelength
+        spec_vals = self.spectra.to_numpy(dtype=np.float64)
+        if wavelength_range is not None:
+            lo, hi = float(min(wavelength_range)), float(max(wavelength_range))
+            keep = (wl >= lo) & (wl <= hi)
+            if np.count_nonzero(keep) < 2:
+                raise ValueError(f"calc_ape: wavelength_range {wavelength_range} leaves fewer than 2 spectral points")
+            wl = wl[keep]
+            spec_vals = spec_vals[:, keep]
+
+        phi = spec_vals * (wl[np.newaxis, :] * 1e-9) / constants.h / constants.c
+        mask = np.all(phi == 0.0, axis=1)
+        phi[mask, :] = np.nan
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return trapezoid(x=wl, y=spec_vals) / constants.e / trapezoid(x=wl, y=phi)
 
     def _recompute_energy_in(self) -> None:
-        """Recompute the integrated energy input [kWh/m^2/yr] from the current rows and their time weights."""
+        """Recompute the integrated energy input [kWh/m^2] over the covered period from current rows and dt."""
         if len(self.datetime) == 0:
             self.energy_in = 0.0
             return
-        self.energy_in = float(np.nansum(self.irradiance.to_numpy() * self.dt.to_numpy())) / 3600 / 1000  # [Ws/m^2] -> [kWh/m^2/yr]
+        self.energy_in = float(np.nansum(self.irradiance.to_numpy() * self.dt.to_numpy())) / 3600 / 1000  # [Ws/m^2] -> [kWh/m^2]
 
     def _apply_row_mask(self, mask: np.ndarray) -> "Meteo":
         """
@@ -704,35 +812,35 @@ class Meteo:
         self_copy._recompute_energy_in()
         return self_copy
 
-    def filter_ape(self, min_ape: float = 0, max_ape: float = 10) -> "Meteo":
+    def filter_ape(self, min_ape: float = 0, max_ape: float = 10, wavelength_range: tuple[float, float] | None = None) -> "Meteo":
         """
-        Filter the average photon energy (APE) within specified bounds.
+        Filter the average photon energy (APE) [eV] within specified bounds.
 
-        Args:
-            min_ape (float, optional): Minimum value of the APE. Defaults to 0.
-            max_ape (float, optional): Maximum value of the APE. Defaults to 10.
-
-        Returns:
-            Meteo: A new Meteo instance with filtered data.
+        Note: Literature APE bounds depend on the spectroradiometer wavelength
+        window (see 'calc_ape'); pass 'wavelength_range=(wl_min, wl_max)' [nm]
+        when applying bounds defined over a restricted spectral range. That APE
+        is computed for this filter only; the stored 'average_photon_energy'
+        (used without 'wavelength_range', calculated over all wavelengths when
+        missing) is left unchanged.
         """
-        if self.average_photon_energy is None:
-            self.calc_ape()
-        assert self.average_photon_energy is not None
+        if wavelength_range is not None:
+            ape = self._compute_ape(wavelength_range)
+        else:
+            if self.average_photon_energy is None:
+                self.calc_ape()
+            ape = self.average_photon_energy
+        assert ape is not None
 
         # NaN APE rows (all-zero spectra) compare False and are dropped
-        ape_mask = (self.average_photon_energy > min_ape) & (self.average_photon_energy < max_ape)
+        ape_mask = (ape > min_ape) & (ape < max_ape)
         return self._apply_row_mask(np.asarray(ape_mask))
 
-    def filter_spectra(self, min_spectra: float = 0, max_spectra: float = 10) -> "Meteo":
+    def filter_spectra(self, min_spectra: float = -1e-6, max_spectra: float = 10) -> "Meteo":
         """
-        Filter the spectral data within specified bounds.
+        Filter the spectral data within specified bounds [W/m^2/nm].
 
-        Args:
-            min_spectra (float, optional): Minimum value of the spectra. Defaults to 0.
-            max_spectra (float, optional): Maximum value of the spectra. Defaults to 10.
-
-        Returns:
-            Meteo: A new Meteo instance with filtered spectral data.
+        Defaults 'min_spectra=-1e-6' to tolerate tiny floating-point baseline noise
+        on dawn/dusk rows; pass 'min_spectra=0.0' for strict non-negativity.
         """
         spectra_mask = (self.spectra >= min_spectra).all(axis=1) & (self.spectra < max_spectra).all(axis=1)
         return self._apply_row_mask(np.asarray(spectra_mask))
@@ -751,27 +859,27 @@ class Meteo:
 
     def reindex(self, index: pd.Index, method: str = "nearest", tolerance: pd.Timedelta | None = None) -> "Meteo":
         """
-        Reindex the data according to the provided time indexer.
+        Reindex the data according to the provided strictly increasing time indexer.
 
         All row-aligned attributes (pandas series/frames *and* the numpy
-        jsc/bandgap/sigma/APE arrays) are aligned to ``index``; rows without a
-        match within ``tolerance`` become NaN. Time weights ``dt`` and
-        ``energy_in`` are recomputed for the new index.
-
-        Args:
-            index (pd.Index): New index to reindex the data to.
-            method (str, optional): Method to use for reindexing. Defaults to "nearest".
-            tolerance (pd.Timedelta, optional): Tolerance for the nearest method. Defaults to 30 seconds.
-
-        Returns:
-            Meteo: A new Meteo instance with reindexed data.
+        jsc/bandgap/sigma/APE arrays) are aligned to 'index'; rows without a
+        match within 'tolerance' become NaN. For regular target grids, trapezoid
+        time weights 'dt' are recomputed on 'index'; when 'index' contains
+        multi-step gaps (e.g. a daytime-only index), matched rows retain their
+        original 'self.dt' weights so gaps are not bridged.
         """
         if tolerance is None:
-            # pandas stubs widen Timedelta(...) to Timedelta | NaTType even though
-            # this literal call cannot produce NaT.
             tolerance = pd.Timedelta(seconds=30)  # ty: ignore[invalid-assignment]
 
         index = pd.DatetimeIndex(index)
+        if len(index) >= 2:
+            idx_secs = (index - index[0]).total_seconds().to_numpy(dtype=np.float64)
+            idx_gaps = np.diff(idx_secs)
+            if np.any(idx_gaps <= 0.0):
+                raise ValueError("Meteo.reindex: target index must be strictly increasing")
+        else:
+            idx_gaps = np.zeros(0, dtype=np.float64)
+
         self_copy = copy.deepcopy(self)
 
         # Reindex all pandas DataFrame or Series attributes
@@ -794,6 +902,16 @@ class Meteo:
                 setattr(self_copy, attr_name, new)
 
         self_copy.datetime = index
-        self_copy.dt = pd.Series(_time_weights(index), index=index)
+        if len(index) >= 3 and float(np.median(idx_gaps)) > 0.0 and float(idx_gaps.max()) > 2.0 * float(np.median(idx_gaps)):
+            logger.warning(
+                "Meteo.reindex: target index has gaps up to {:.2f} h (median step {:.2f} h); preserving matched source dt weights instead of bridging gaps",
+                float(idx_gaps.max()) / 3600.0,
+                float(np.median(idx_gaps)) / 3600.0,
+            )
+            src_dt = self.dt.to_numpy(dtype=np.float64)
+            w_out = np.where(indexer >= 0, src_dt[indexer], 0.0)
+        else:
+            w_out = _time_weights(index)
+        self_copy.dt = pd.Series(w_out, index=index)
         self_copy._recompute_energy_in()
         return self_copy

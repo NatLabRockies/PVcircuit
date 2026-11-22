@@ -29,13 +29,13 @@ Eg_DEFAULT = 1.1  # [eV]
 SIGMA_DEFAULT = 0  # [eV]
 TC_REF = 25.0  # [C]
 AREA_DEFAULT = 1.0  # [cm^2] note: if A=1, then I->J
-BETA_DEFAULT = 15.0  # unitless
+BETA_DEFAULT = 15.0  # unitless; Geisz 2015 Eq. 9 requires emitter sum(J0ratio[n==1]) >= 1 + beta * min(1, A_rx/A_em) for strict photon conservation
 # [A/cm^2] reference current density that makes J0ratio dimensionless.
 # The value is 1 mA/cm^2, matching the historical PVcircuit/Igor convention.
 J0_REFERENCE = 1e-3
 
 # numerical calculation parameters
-VLIM_REVERSE = 10.0
+VLIM_REVERSE = 1000.0
 VLIM_FORWARD = 3.0
 EPSREL = 1e-15
 MAXITER = 1000
@@ -74,63 +74,22 @@ def _legacy_solver() -> bool:
 GITpath = os.path.dirname(os.path.dirname(__file__))
 
 
-@lru_cache(maxsize=100)
-def Jdb(TC: float, Eg: float, sigma: float = 0, theta: float = 2.0):
-    """[A/cm^2] detailed-balance reverse saturation current density.
-
-    Two physical models, selected by ``theta``:
-
-    - ``theta = 2.0`` (default, Mattheis-Rau-Werner): ``sigma`` is the
-      standard deviation [eV] of a Gaussian distribution of local bandgaps.
-      Uses the historical pvcircuit closed-form expression. This is the
-      backward-compatible path; existing call sites and serialized devices
-      are unaffected.
-
-    - ``theta != 2.0`` (generalized Urbach, Katahara et al. 2014 JAP 116,
-      173504): ``sigma`` is reinterpreted as the energy scale gamma_U [eV]
-      of an exponential-family sub-bandgap tail
-
-          a(E) = exp(-((Eg - E) / sigma) ** theta)   for  E < Eg
-          a(E) = 1                                     for  E >= Eg
-
-      Integrated numerically against the Boltzmann blackbody tail.
-
-      Suggested theta values (Katahara 2014):
-          theta = 1     : true Urbach (GaAs ~ 9 meV, perovskite, a-Si)
-          theta = 5/4   : screened Thomas-Fermi (CZTS-like)
-          theta = 3/2   : Franz-Keldysh (CIGS)
-          theta = 2     : Werner-Rau (uses the closed form above)
-
-    For ``sigma == 0`` both models reduce to the Shockley-Queisser step
-    result independent of ``theta``, so all existing zero-sigma callers and
-    baseline tests are unchanged.
-
-    A UserWarning is emitted in the numerical path when ``sigma > 3 * Vth``,
-    because the generalized-Urbach absorptivity model becomes physically
-    suspect when the tail energy exceeds a few thermal voltages.
-    """
-
+@lru_cache(maxsize=256)
+def _jdb_core(TC: float, Eg: float, sigma: float, theta: float) -> tuple[float, float]:
     Vthlocal = Vth(TC)
     TKlocal = TK(TC)
     EgkT = Eg / Vthlocal
     sq_bracket = EgkT * EgkT + 2.0 * EgkT + 2.0
 
     # Detailed balance step (no tail). Both theta branches collapse here.
-    if sigma == 0:
-        return DB_PREFIX * TKlocal**3.0 * sq_bracket * np.exp(-EgkT)
+    if sigma == 0.0:
+        return float(DB_PREFIX * TKlocal**3.0 * sq_bracket * np.exp(-EgkT)), 0.0
 
     if theta == 2.0:
         # Mattheis-Rau-Werner Gaussian bandgap-fluctuation closed form.
         # Historical pvcircuit expression, preserved verbatim.
-        return DB_PREFIX * TKlocal**3.0 * (sq_bracket - 2 * sigma**2 * Eg / Vthlocal**3 - sigma**2 / Vthlocal**2 + sigma**4 / Vthlocal**4) * np.exp(-EgkT + sigma**2 / (2 * Vthlocal**2))
-
-    # Generalized-Urbach numerical integration.
-    if sigma > 3.0 * Vthlocal:
-        warnings.warn(
-            f"Jdb: sigma={sigma:.3g} eV exceeds 3*Vth ({3.0 * Vthlocal:.3g} eV) at TC={TC} C. Generalized-Urbach result may be unphysical.",
-            UserWarning,
-            stacklevel=2,
-        )
+        val = DB_PREFIX * TKlocal**3.0 * (sq_bracket - 2 * sigma**2 * Eg / Vthlocal**3 - sigma**2 / Vthlocal**2 + sigma**4 / Vthlocal**4) * np.exp(-EgkT + sigma**2 / (2 * Vthlocal**2))
+        return float(val), 0.0
 
     # Bracket = integral_0^inf a(x) * x^2 * exp(-x) dx with x = E/Vth.
     # Above-Eg piece (a=1, closed form): exp(-EgkT) * (EgkT^2 + 2 EgkT + 2).
@@ -140,8 +99,89 @@ def Jdb(TC: float, Eg: float, sigma: float = 0, theta: float = 2.0):
         ratio = u * Vthlocal / sigma  # = (Eg - E) / sigma
         return np.exp(-(ratio**theta)) * x * x * np.exp(-x)
 
-    below_eg, _ = quad(_integrand, 0.0, EgkT, limit=200, epsrel=1e-10)
-    return DB_PREFIX * TKlocal**3.0 * (np.exp(-EgkT) * sq_bracket + below_eg)
+    mid = 0.5 * EgkT
+    below_half, _ = quad(_integrand, 0.0, mid, limit=200, epsrel=1e-10, epsabs=0.0)
+    below_upper, _ = quad(_integrand, mid, EgkT, limit=200, epsrel=1e-10, epsabs=0.0)
+    below_eg = below_half + below_upper
+    total_bracket = np.exp(-EgkT) * sq_bracket + below_eg
+    low_share = float(below_half / total_bracket) if total_bracket > 0.0 else 0.0
+    return float(DB_PREFIX * TKlocal**3.0 * total_bracket), low_share
+
+
+def Jdb(TC: float, Eg: float, sigma: float = 0, theta: float = 2.0):
+    r"""[A/cm^2] detailed-balance reverse saturation current density.
+
+    Two physical models, selected by 'theta':
+
+    - 'theta == 2.0' (default, Mattheis-Rau-Werner): 'sigma' is the
+      standard deviation [eV] of a Gaussian distribution of local bandgaps
+      (absorptance 0.5 at Eg). Uses the historical pvcircuit closed-form
+      expression. Note that in Katahara and Hillhouse (2014), 'theta = 2' of
+      the generalized family below is Kane's Thomas-Fermi tail (absorptance 1
+      at Eg), so Jdb steps discontinuously across 'theta == 2.0'. The closed
+      form averages over all local gaps and becomes unphysical when
+      'sigma^2 > 0.5 * Eg * Vth'.
+
+    - 'theta != 2.0' (generalized Urbach, Katahara and Hillhouse 2014,
+      J. Appl. Phys. 116, 173504): 'sigma' is the energy scale gamma_U [eV]
+      of a unit-amplitude exponential-family sub-bandgap tail extended to
+      zero photon energy:
+
+          a(E) = exp(-((Eg - E) / sigma) ** theta)   for  0 <= E < Eg
+          a(E) = 1                                   for  E >= Eg
+
+      Integrated numerically against the Boltzmann blackbody tail with
+      'epsabs=0.0' so narrow tails retain full relative precision.
+
+      Representative 'theta' values (Katahara and Hillhouse 2014):
+          theta = 1     : exponential Urbach (GaAs ~ 5-10 meV, perovskite ~ 15 meV;
+                          valid only for sigma < Vth, so not applicable to a-Si ~ 50 meV)
+          theta = 5/4   : screened Thomas-Fermi (CZTS-like, valid up to sigma ~ 2*Vth)
+          theta = 3/2   : Franz-Keldysh (CIGS)
+
+    For 'sigma == 0' both models reduce to the Shockley-Queisser step result
+    independent of 'theta'.
+
+    A UserWarning is emitted when the model enters an unphysical regime:
+    for 'theta != 2.0', when 'sigma > 3 * Vth' or when low-energy emission
+    below 'Eg / 2' exceeds 0.1% of the total radiative current (e.g.
+    'theta = 1' with 'sigma >= Vth', where emission piles up near E -> 0);
+    for 'theta == 2.0', when 'sigma^2 > 0.5 * Eg * Vth'.
+    """
+    if sigma < 0.0:
+        raise ValueError(f"Jdb: sigma must be >= 0, got {sigma}")
+
+    TC_f = float(TC)
+    Eg_f = float(Eg)
+    sigma_f = float(sigma)
+    theta_f = float(theta)
+    Vthlocal = Vth(TC_f)
+
+    jdb_val, low_share = _jdb_core(TC_f, Eg_f, sigma_f, theta_f)
+
+    if sigma_f > 0.0:
+        if theta_f == 2.0:
+            if sigma_f * sigma_f > 0.5 * Eg_f * Vthlocal:
+                warnings.warn(
+                    f"Jdb: sigma={sigma_f:.3g} eV gives sigma^2 > 0.5*Eg*Vth at TC={TC_f} C; "
+                    "Gaussian-bandgap closed form includes unphysical negative-energy states.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        elif sigma_f > 3.0 * Vthlocal or low_share > 1e-3:
+            warnings.warn(
+                f"Jdb: generalized-Urbach tail (theta={theta_f:g}, sigma={sigma_f:.3g} eV at TC={TC_f} C, "
+                f"Vth={Vthlocal:.3g} eV, sub-Eg/2 emission share={low_share:.2e}) is unphysical because "
+                "low-energy emission dominates the E >= 0 integral.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    return jdb_val
+
+
+setattr(Jdb, "cache_clear", _jdb_core.cache_clear)
+setattr(Jdb, "cache_info", _jdb_core.cache_info)
 
 
 def timestamp(fmt="%y%m%d-%H%M%S", tm=None) -> str:
@@ -258,6 +298,26 @@ def _scaled_expm1_scalar(coefficient, exponent):
 # ----------------------------------------------------------------------
 # Vectorized solver core
 # ----------------------------------------------------------------------
+
+
+def _reverse_limit(rbb: dict) -> float:
+    """[V] lower end of the junction-voltage bracket for the RBB parameters ``rbb``.
+
+    -VLIM_REVERSE, except for Bishop breakdown with Vrb > 0: its factor
+    (1 + V/Vrb)^(-mrb) diverges at the breakdown voltage V = -Vrb and is
+    undefined below it, so the bracket ends just above -Vrb, where the
+    breakdown current is far beyond any finite target and every finite
+    current has a root.
+    """
+    if rbb.get("method") == "bishop":
+        Vrb = float(rbb.get("Vrb", 0.0))
+        mrb = float(rbb.get("mrb", 0.0))
+        if Vrb > 0.0 and mrb != 0.0:
+            # (1 + V/Vrb) at the bracket end: small, but large enough that
+            # base^(-mrb) stays finite (<= 1e200)
+            base = max(1e-12, 10.0 ** (-200.0 / mrb)) if mrb > 0.0 else 1e-12
+            return max(-VLIM_REVERSE, -Vrb * (1.0 - base))
+    return -VLIM_REVERSE
 
 
 def _recomb_current(V, st, plus_J0=False):
@@ -425,12 +485,12 @@ def _vjunction_scalar(Jtot, st, Gx=0.0, Vref=0.0):
 
     Solves J(V) + Gx * (V - Vref) = Jtot with the same safeguarded Newton
     iteration; for a handful of points this is faster than array operations.
-    Returns nan where [-VLIM_REVERSE, VLIM_FORWARD] holds no root.
+    Returns nan where [st["vlo"], max(VLIM_FORWARD, Eg + 1)] holds no root.
     """
     if not (math.isfinite(Jtot) and math.isfinite(Vref)):
         return math.nan
-    lo = -VLIM_REVERSE
-    hi = VLIM_FORWARD
+    lo = st.get("vlo", -VLIM_REVERSE)
+    hi = max(VLIM_FORWARD, st.get("Eg", 0.0) + 1.0)
     Tj = Jtot + st["J0sum"]
     if not (_recomb_newton_scalar(lo, st)[0] - Tj) + Gx * (lo - Vref) <= 0.0:
         return math.nan
@@ -471,16 +531,17 @@ def _vjunction_scalar(Jtot, st, Gx=0.0, Vref=0.0):
         gt = g + Gx
         Vn = math.nan
         if gt != 0.0 and math.isfinite(gt):  # an infinite derivative gives a zero step: bisect
-            step = f / gt
+            plain_step = f / gt
+            step = plain_step
             St = S + Gx * V
             if St > 0.0 and Tt > 0.0:
                 ratio = St / Tt
-                if ratio > 0.0:
+                if ratio >= 0.5:
                     logstep = math.log(ratio) * (St / gt)
                     if math.isfinite(logstep):
                         step = logstep
             Vn = V - step
-            if abs(step) <= XTOL_ROWS:
+            if abs(step) <= XTOL_ROWS and abs(plain_step) <= XTOL_ROWS:
                 return Vn
         if not (lo <= Vn <= hi) or iteration >= NEWTON_ROWS:
             Vn = 0.5 * (lo + hi)
@@ -518,6 +579,8 @@ def _jdb_rows(TC, Eg, sigma, theta=2.0):
     scalar Jdb row by row because of its numerical integral.
     """
     TC, Eg, sigma = (np.array(a, dtype=np.float64) for a in np.broadcast_arrays(TC, Eg, sigma))
+    if np.any(sigma < 0.0):
+        raise ValueError("Jdb: sigma must be >= 0")
     Vthlocal = Vth(TC)
     TKlocal = TK(TC)
     EgkT = Eg / Vthlocal
@@ -527,6 +590,12 @@ def _jdb_rows(TC, Eg, sigma, theta=2.0):
     if tail.any():
         if theta == 2.0:
             s, v = sigma[tail], Vthlocal[tail]
+            if np.any(s * s > 0.5 * Eg[tail] * v):
+                warnings.warn(
+                    "Jdb: sigma^2 exceeds 0.5*Eg*Vth on one or more rows; Gaussian-bandgap closed form includes unphysical negative-energy states.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             out[tail] = DB_PREFIX * TKlocal[tail] ** 3.0 * (sq_bracket[tail] - 2 * s**2 * Eg[tail] / v**3 - s**2 / v**2 + s**4 / v**4) * np.exp(-EgkT[tail] + s**2 / (2 * v**2))
         else:
             out[tail] = [Jdb(float(t), float(e), float(s), theta=float(theta)) for t, e, s in zip(TC[tail], Eg[tail], sigma[tail])]
@@ -541,6 +610,8 @@ def _state_take(st, idx):
     out = dict(st)
     for key in ("nVth", "J0", "Vth", "Jdb", "notdiode"):
         out[key] = st[key][idx]
+    if "Eg" in st and np.ndim(st["Eg"]) > 0:
+        out["Eg"] = st["Eg"][idx]
     if "J0rb_effective" in st["rbb"]:
         out["rbb"] = dict(st["rbb"], J0rb_effective=st["rbb"]["J0rb_effective"][idx])
     return out
@@ -558,11 +629,12 @@ def _vjunction_rows(Jtot, st, Gx=0.0, Vref=0.0):
 
     Works on S(V) = J(V) + sum(J0), which stays well conditioned in reverse
     bias where J itself saturates at -sum(J0). Safeguarded Newton inside the
-    bracket [-VLIM_REVERSE, VLIM_FORWARD]: the step is taken on the logarithm
-    of the current, which is exact for a single exponential; it falls back to
-    a plain Newton step and then to bisection of the maintained bracket.
-    Returns np.nan where the bracket holds no root, the same contract as
-    Junction._vdiode_arr.
+    bracket [st["vlo"], max(VLIM_FORWARD, Eg + 1)] (st["vlo"] is -VLIM_REVERSE
+    unless a Bishop breakdown lies above it, see _reverse_limit): the step is taken on
+    the logarithm of the current where S / T >= 0.5, which is exact for a
+    single exponential; it falls back to a plain Newton step and then to
+    bisection of the maintained bracket. Returns np.nan where the bracket
+    holds no root, the same contract as Junction._vdiode_arr.
     """
     Jtot = np.asarray(Jtot, dtype=np.float64)
     npts = Jtot.size
@@ -570,8 +642,11 @@ def _vjunction_rows(Jtot, st, Gx=0.0, Vref=0.0):
     resistive = Gx != 0.0
     Vref = np.broadcast_to(np.asarray(Vref, dtype=np.float64), Jtot.shape)
     V = np.full(npts, np.nan)
-    lo = np.full(npts, -VLIM_REVERSE)
-    hi = np.full(npts, VLIM_FORWARD)
+    lo = np.full(npts, st.get("vlo", -VLIM_REVERSE))
+    if "Eg" in st:
+        hi = np.array(np.broadcast_to(np.maximum(VLIM_FORWARD, np.asarray(st["Eg"], dtype=np.float64) + 1.0), (npts,)), dtype=np.float64)
+    else:
+        hi = np.full(npts, VLIM_FORWARD)
     T = Jtot + st["J0"].sum(axis=-1)
     with np.errstate(invalid="ignore", over="ignore"):
         flo = _recomb_current(lo, st, plus_J0=True) - T
@@ -594,7 +669,7 @@ def _vjunction_rows(Jtot, st, Gx=0.0, Vref=0.0):
             V0 = np.full(npts, np.inf)
         if Geff > 0.0:
             V0 = np.where(Jeff > 0.0, np.minimum(V0, Jeff / Geff), Jeff / Geff)
-    V0 = np.where(np.isfinite(V0), np.clip(V0, -VLIM_REVERSE, VLIM_FORWARD), 0.0)
+    V0 = np.where(np.isfinite(V0), np.clip(V0, lo, hi), 0.0)
 
     act = np.flatnonzero(bracketed)
     sta = _state_take(st, act) if per_row else st
@@ -616,15 +691,19 @@ def _vjunction_rows(Jtot, st, Gx=0.0, Vref=0.0):
         ha = np.where(f > 0.0, Va, ha)
         la = np.where(f < 0.0, Va, la)
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            logstep = np.log(S / Tt) * (S / g)
-            step = np.where((S > 0.0) & (Tt > 0.0) & np.isfinite(logstep), logstep, f / g)
+            plain_step = f / g
+            ratio = S / Tt
+            logstep = np.log(ratio) * (S / g)
+            step = np.where((S > 0.0) & (Tt > 0.0) & (ratio >= 0.5) & np.isfinite(logstep), logstep, plain_step)
             # an overflowing derivative makes the step 0 although f is finite: that is
             # no convergence; the nan step fails both tests below and bisects
             step = np.where(np.isfinite(g), step, np.nan)
+            plain_step = np.where(np.isfinite(g), plain_step, np.nan)
         Vn = Va - step
         # a step below the tolerance is converged even if rounding puts it on the
-        # bracket edge; after NEWTON_ROWS steps only bisection is left, which ends
-        small = np.abs(step) <= XTOL_ROWS
+        # bracket edge; require plain_step <= XTOL_ROWS too so tiny S near the shunt
+        # line cannot trigger false convergence; after NEWTON_ROWS steps bisect
+        small = (np.abs(step) <= XTOL_ROWS) & (np.abs(plain_step) <= XTOL_ROWS)
         newton = (Vn >= la) & (Vn <= ha) & (iteration < NEWTON_ROWS)
         Vn = np.where(small | newton, Vn, 0.5 * (la + ha))
         Vn = np.where(f == 0.0, Va, Vn)
@@ -660,22 +739,24 @@ def _vmid_rows(Vtot, Jphoto, st, Rser):
     Vtot = np.asarray(Vtot, dtype=np.float64)
     Jphoto = np.broadcast_to(np.asarray(Jphoto, dtype=np.float64), Vtot.shape)
     if Rser == 0.0:
+        vhi = np.maximum(VLIM_FORWARD, np.asarray(st["Eg"], dtype=np.float64) + 1.0) if "Eg" in st else VLIM_FORWARD
         with np.errstate(invalid="ignore"):
-            inside = (Vtot >= -VLIM_REVERSE) & (Vtot <= VLIM_FORWARD) & np.isfinite(Jphoto)
+            inside = (Vtot >= st.get("vlo", -VLIM_REVERSE)) & (Vtot <= vhi) & np.isfinite(Jphoto)
         return np.where(inside, Vtot, np.nan)
     return _vjunction_rows(Jphoto, st, 1.0 / Rser, Vtot)
 
 
-def _maximize_rows(power, lower, upper, index, pnts, rounds):
+def _maximize_rows(power, lower, upper, index, pnts, rounds, first_pnts=None):
     """Maximum of power(u, index) for u between ``lower`` and ``upper``, for every element at once.
 
     ``power(u, index)`` returns the power of the elements ``index`` (integer
     array) at the abscissae ``u``; np.nan counts as no power. This is the
     search of Multi2T.MPP and of Tandem3T.CM / VM with all elements solved
-    together: ``rounds`` scans of ``pnts`` points, each between the neighbours
-    of the best point of the scan before. A bracketed scalar minimizer then
-    refines the best point between its last neighbours, where those searches
-    stop on their grid.
+    together: ``rounds`` scans of ``pnts`` points (with optional denser
+    ``first_pnts`` on the first scan), zooming around every interior local
+    maximum found on the first scan so bimodal curves (e.g. reverse breakdown)
+    are never trapped on the lower lobe. A bracketed scalar minimizer then
+    refines each candidate between its last neighbours.
 
     Returns (u, P, complete): location and value of the maximum (np.nan
     without any solution), and whether every scan point before the best one
@@ -683,16 +764,62 @@ def _maximize_rows(power, lower, upper, index, pnts, rounds):
     junction driven out of its voltage range); before it they are a solver
     failure that may hide the maximum.
     """
-    count = np.arange(index.size)
+    nelem = index.size
+    if nelem == 0:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64), np.empty(0, dtype=bool)
+
+    lo0 = np.asarray(np.broadcast_to(np.asarray(lower, dtype=np.float64), index.shape), dtype=np.float64).copy()
+    hi0 = np.asarray(np.broadcast_to(np.asarray(upper, dtype=np.float64), index.shape), dtype=np.float64).copy()
+    n0 = pnts if first_pnts is None else int(first_pnts)
+
+    # First scan: identify argmax for every element plus any extra interior local maxima
+    grid0 = np.linspace(lo0, hi0, n0, axis=1)
+    P0 = power(grid0.ravel(), np.repeat(index, n0)).reshape(nelem, n0)
+    solved0 = np.isfinite(P0)
+    P0_clean = np.where(solved0, P0, -np.inf)
+    nmax0 = np.argmax(P0_clean, axis=1)
+    pos0 = np.arange(n0)[None, :]
+    row_arange = np.arange(nelem)
+
+    cand_elem = row_arange
+    cand_index = np.asarray(index)
+    best = np.where(np.isfinite(P0_clean[row_arange, nmax0]), grid0[row_arange, nmax0], np.nan)
+    Pbest = P0_clean[row_arange, nmax0].copy()
+    complete = (solved0 | (pos0 > nmax0[:, None])).all(axis=1)
+    lo = grid0[row_arange, np.maximum(nmax0 - 1, 0)]
+    hi = grid0[row_arange, np.minimum(nmax0 + 1, n0 - 1)]
+    last_grid = grid0
+    last_P = P0_clean
+    last_nmax = nmax0
+    last_pnts = n0
+
+    if n0 >= 3:
+        # Interior local maxima distinct from nmax0 (only occurs on multi-lobe curves)
+        interior_solved = solved0[:, :-2] & solved0[:, 1:-1] & solved0[:, 2:]
+        is_local = interior_solved & (P0_clean[:, 1:-1] > P0_clean[:, :-2]) & (P0_clean[:, 1:-1] >= P0_clean[:, 2:]) & (P0_clean[:, 1:-1] > 0.0)
+        erow, ek_inner = np.nonzero(is_local)
+        ek = ek_inner + 1
+        distinct = ek != nmax0[erow]
+        if np.any(distinct):
+            erow = erow[distinct]
+            ek = ek[distinct]
+            cand_elem = np.concatenate([cand_elem, erow])
+            cand_index = np.concatenate([cand_index, index[erow]])
+            best = np.concatenate([best, grid0[erow, ek]])
+            Pbest = np.concatenate([Pbest, P0_clean[erow, ek]])
+            complete = np.concatenate([complete, (solved0[erow] | (pos0 > ek[:, None])).all(axis=1)])
+            lo = np.concatenate([lo, grid0[erow, ek - 1]])
+            hi = np.concatenate([hi, grid0[erow, ek + 1]])
+            last_grid = np.vstack([grid0, grid0[erow]])
+            last_P = np.vstack([P0_clean, P0_clean[erow]])
+            last_nmax = np.concatenate([nmax0, ek])
+
+    ncand = cand_index.size
+    count = np.arange(ncand)
     position = np.arange(pnts)[None, :]
-    lo = np.array(np.broadcast_to(np.asarray(lower, dtype=np.float64), index.shape))
-    hi = np.array(np.broadcast_to(np.asarray(upper, dtype=np.float64), index.shape))
-    best = np.full(index.size, np.nan)
-    Pbest = np.full(index.size, -np.inf)
-    complete = np.ones(index.size, dtype=bool)
-    for _ in range(rounds):
+    for _ in range(1, rounds):
         grid = np.linspace(lo, hi, pnts, axis=1)
-        P = power(grid.ravel(), np.repeat(index, pnts)).reshape(index.size, pnts)
+        P = power(grid.ravel(), np.repeat(cand_index, pnts)).reshape(ncand, pnts)
         solved = np.isfinite(P)
         P = np.where(solved, P, -np.inf)
         nmax = np.argmax(P, axis=1)
@@ -702,11 +829,15 @@ def _maximize_rows(power, lower, upper, index, pnts, rounds):
         Pbest = np.where(higher, P[count, nmax], Pbest)
         lo = grid[count, np.maximum(nmax - 1, 0)]
         hi = grid[count, np.minimum(nmax + 1, pnts - 1)]
+        last_grid = grid
+        last_P = P
+        last_nmax = nmax
+        last_pnts = pnts
 
     # refine inside the last pair of neighbours
-    xm = grid[count, nmax]
+    xm = last_grid[count, last_nmax]
     xl, xr = np.minimum(lo, hi), np.maximum(lo, hi)
-    inside = (nmax > 0) & (nmax < pnts - 1) & (P[count, nmax] > 0.0) & (xl < xm) & (xm < xr)
+    inside = (last_nmax > 0) & (last_nmax < last_pnts - 1) & (last_P[count, last_nmax] > 0.0) & (xl < xm) & (xm < xr)
     if inside.any():
         i = np.flatnonzero(inside)
 
@@ -714,19 +845,49 @@ def _maximize_rows(power, lower, upper, index, pnts, rounds):
             value = power(u, idx.astype(np.intp))
             return np.where(np.isfinite(value), -value, 0.0)
 
-        res = elementwise.find_minimum(negative_power, (xl[i], xm[i], xr[i]), args=(index[i].astype(np.float64),), tolerances=dict(xatol=0.0, xrtol=XRTOL_MPP, fatol=0.0, frtol=0.0))
+        res = elementwise.find_minimum(negative_power, (xl[i], xm[i], xr[i]), args=(cand_index[i].astype(np.float64),), tolerances=dict(xatol=0.0, xrtol=XRTOL_MPP, fatol=0.0, frtol=0.0))
         higher = -res.f_x > Pbest[i]
         best[i] = np.where(higher, res.x, best[i])
         Pbest[i] = np.where(higher, -res.f_x, Pbest[i])
+
+    if ncand > nelem:
+        out_best = best[:nelem].copy()
+        out_Pbest = Pbest[:nelem].copy()
+        out_complete = complete[:nelem].copy()
+        for c in range(nelem, ncand):
+            elem = cand_elem[c]
+            if Pbest[c] > out_Pbest[elem]:
+                out_best[elem] = best[c]
+                out_Pbest[elem] = Pbest[c]
+                out_complete[elem] = complete[c]
+        best, Pbest, complete = out_best, out_Pbest, out_complete
+
     return best, np.where(np.isfinite(Pbest), Pbest, np.nan), complete
+
+
+def _snapshot_attrs(obj) -> dict:
+    """Copy of obj.__dict__ (arrays, dicts and lists copied) for rolling back a failed set()."""
+    return {key: (value.copy() if isinstance(value, (np.ndarray, dict, list)) else value) for key, value in obj.__dict__.items()}
+
+
+def _restore_attrs(obj, snapshot: dict) -> None:
+    """Restore obj.__dict__ from _snapshot_attrs; the object keeps its identity."""
+    obj.__dict__.clear()
+    obj.__dict__.update(snapshot)
 
 
 class Junction:
     """
     Class for PV junctions.
+
+    Note on temperature dependence: changing 'TC' updates 'TK', 'Vth', 'Jdb',
+    and therefore 'J0' (assuming a temperature-independent external radiative
+    efficiency via fixed 'J0ratio'), while 'Eg', 'sigma', and 'Jext' remain at
+    their assigned values unless updated explicitly (e.g. per row in
+    'EY.Meteo' via 'EQET' and 'TemperatureModel').
     """
 
-    ATTR = ["Eg", "sigma", "TC", "Gsh", "Rser", "area", "lightarea", "totalarea", "Jext", "JLC", "beta", "gamma", "theta", "pn", "Jphoto", "TK", "Jdb", "RBB"]
+    ATTR = ["Eg", "sigma", "TC", "Gsh", "Rser", "area", "lightarea", "totalarea", "Jext", "JLC", "beta", "gamma", "theta", "pn", "RBB"]
     ARY_ATTR = ["n", "J0ratio", "J0"]
 
     # Diode arrays kept in sync via the custom __setattr__/set() pipeline.
@@ -788,24 +949,26 @@ class Junction:
         if n is None:
             n = [1.0, 2.0]
         ndiodes = len(n)
-        self.n = np.array(n)  # diode ideality list e.g. [n0, n1]
+        self.n = np.array(n, dtype=np.float64)  # diode ideality list e.g. [n0, n1]
+        default_j0ratio = np.full(ndiodes, J0default, dtype=np.float64)
         # 'is not None' rather than truthiness: numpy arrays raise on bool()
         if J0ref is not None and len(J0ref) > 0:  # input list of absolute J0
             if len(J0ref) == ndiodes:  # check length
                 self._J0init(J0ref)  # calculate self.J0ratio from J0ref at current self.TC
             else:
                 logger.warning("J0ref length {} does not match number of diodes {}; using default J0ratio", len(J0ref), ndiodes)
-                self.J0ratio = np.full_like(n, J0default)  # default J0ratio
+                self.J0ratio = default_j0ratio  # default J0ratio
         elif J0ratio is not None and len(J0ratio) > 0:  # input list of relative J0 ratios
             if len(J0ratio) == ndiodes:  # check length
-                self.J0ratio = np.array(J0ratio)  # diode J0/Jdb^(1/n) ratio list for T dependence
+                self.J0ratio = np.array(J0ratio, dtype=np.float64)  # diode J0/Jdb^(1/n) ratio list for T dependence
             else:
                 logger.warning("J0ratio length {} does not match number of diodes {}; using default J0ratio", len(J0ratio), ndiodes)
-                self.J0ratio = np.full_like(n, J0default)  # default J0ratio
+                self.J0ratio = default_j0ratio  # default J0ratio
         else:  # create J0ratio
-            self.J0ratio = np.full_like(n, J0default)  # default J0ratio
+            self.J0ratio = default_j0ratio  # default J0ratio
 
         self.set(RBB=RBB)
+        self._validate_params()
 
     def copy(self) -> Junction:
         """
@@ -904,11 +1067,22 @@ class Junction:
     #                     cntrl.value = attrval
 
     def set(self, **kwargs):
-        # controlled update of Junction attributes
+        """Controlled update of Junction attributes.
 
-        # with self.debugout:
-        #     print("Jset(" + self.name + "): ", list(kwargs.keys()))
+        Atomic: if a keyword is rejected (unknown attribute, malformed diode
+        array or a parameter outside its physical bounds), every attribute
+        keeps its previous value and the error is raised.
+        """
+        snapshot = _snapshot_attrs(self)
+        try:
+            self._set_items(kwargs)
+            self._validate_params(changed_keys=kwargs.keys())
+        except Exception:
+            _restore_attrs(self, snapshot)
+            raise
 
+    def _set_items(self, kwargs: dict) -> None:
+        """Apply the set() keywords one by one, without validation or rollback."""
         for testkey, value in kwargs.items():
             if testkey.endswith("]") and testkey.find("[") > 0:
                 parsed = parse("{}[{:d}]", testkey)  # set one element of array e.g. 'n[0]'
@@ -950,29 +1124,27 @@ class Junction:
             elif key in ["n", "J0ratio"]:  # diode parameters (array)
                 if isinstance(ind, int) and np.isscalar(value):
                     attrval = getattr(self, key)  # current value of attribute
-                    localarray = attrval.copy()
-                    if isinstance(localarray, np.ndarray):
-                        if ind < localarray.size:
-                            # np.isscalar above guards at runtime; ty can't narrow it.
-                            localarray[ind] = np.float64(value)  # ty: ignore[invalid-argument-type]
-                            self.__dict__[key] = localarray
-                            # with self.debugout:
-                            #     print("scalar", key, ind, localarray)
-                        else:
-                            raise IndexError(f"invalid junction index. Set index is {ind + 1} but junction size is {localarray.size}")
+                    localarray = np.asarray(attrval, dtype=np.float64).copy()
+                    if ind < localarray.size:
+                        # np.isscalar above guards at runtime; ty can't narrow it.
+                        localarray[ind] = np.float64(value)  # ty: ignore[invalid-argument-type]
+                        self.__dict__[key] = localarray
+                    else:
+                        raise IndexError(f"invalid junction index. Set index is {ind + 1} but junction size is {localarray.size}")
                 else:
+                    arr = np.array(value, dtype=np.float64)
+                    if arr.ndim != 1:
+                        raise ValueError(f"{key} must be a 1-D sequence of diode values, got shape {arr.shape}")
                     # check if both, n and J0ratio, are set if they have the same size
                     if "n" in kwargs and "J0ratio" in kwargs:
                         if not len(kwargs["n"]) == len(kwargs["J0ratio"]):
                             raise ValueError("n and J0ratio must be same size")
 
                     # if only n or J0ratio is set, check if it matches current diode configuration
-                    elif not len(value) == len(self.n) and not len(value) == len(self.J0ratio):
+                    elif not len(arr) == len(self.n) and not len(arr) == len(self.J0ratio):
                         raise ValueError("setting single n or J0ratio value must match previous number of diodes")
 
-                    self.__dict__[key] = np.array(value)
-                    # with self.debugout:
-                    #     print("array", key, value)
+                    self.__dict__[key] = arr
             elif key in self.ATTR:  # scalar float
                 self.__dict__[key] = np.float64(value)
 
@@ -982,13 +1154,36 @@ class Junction:
             else:
                 logger.warning("Junction.set: attribute {!r} exists but is not settable via set(); value ignored", key)
 
+    def _validate_params(self, changed_keys=None):
+        """Validate physical parameter bounds on Junction state.
+
+        'changed_keys' are the keywords of a set() call: only the bounds that
+        involve them are checked (all bounds for None), so a value assigned
+        directly to an attribute does not make every later set() fail.
+        """
+        keys = None if changed_keys is None else {str(k).split("[", 1)[0] for k in changed_keys}
+
+        def changed(*names: str) -> bool:
+            return keys is None or not keys.isdisjoint(names)
+
+        if changed("Gsh") and self.Gsh < 0.0:
+            raise ValueError(f"Junction '{self.name}': Gsh ({self.Gsh}) must be >= 0.")
+        if changed("sigma") and self.sigma < 0.0:
+            raise ValueError(f"Junction '{self.name}': sigma ({self.sigma}) must be >= 0.")
+        if changed("area", "totalarea") and self.totalarea <= 0.0:
+            raise ValueError(f"Junction '{self.name}': totalarea ({self.totalarea}) must be > 0.")
+        if changed("area", "lightarea") and self.lightarea < 0.0:
+            raise ValueError(f"Junction '{self.name}': lightarea ({self.lightarea}) must be >= 0.")
+        if changed("J0ratio") and np.any(self.J0ratio < 0.0):
+            raise ValueError(f"Junction '{self.name}': J0ratio entries must be >= 0, got {self.J0ratio}.")
+
         # Boundary-condition check: the photocurrent property scales as
         # Jphoto = Jext * lightarea / totalarea + JLC, so lightarea must
         # never exceed totalarea (no more than 100 % of the device is
         # illuminated). Validate once after all kwargs are processed so
         # multi-key sets like set(lightarea=X, totalarea=Y) are checked
         # against their final state, not transient intermediates.
-        if any(k in kwargs for k in ("area", "lightarea", "totalarea")):
+        if changed("area", "lightarea", "totalarea"):
             if self.lightarea > self.totalarea:
                 raise ValueError(
                     f"Junction '{self.name}': lightarea ({self.lightarea}) "
@@ -996,6 +1191,21 @@ class Junction:
                     "Jphoto = Jext * lightarea/totalarea assumes the "
                     "illuminated fraction is at most 1."
                 )
+
+        if self.RBB_dict.get("method") == "bishop" and changed("RBB", "method", "RBB_dict", "mrb", "avalanche", "Vrb"):
+            mrb = float(self.RBB_dict.get("mrb", 0.0))
+            vrb = float(self.RBB_dict.get("Vrb", 0.0))
+            av = float(self.RBB_dict.get("avalanche", 0.0))
+            if mrb > 1.0 and vrb < 0.0:
+                a_crit = ((mrb + 1.0) / (mrb - 1.0)) ** (mrb + 1.0)
+                if av > a_crit:
+                    logger.warning(
+                        "Junction '{}': Bishop avalanche={} exceeds monotonicity bound {:.3g} for mrb={}; J(V) is non-monotone in reverse bias",
+                        self.name,
+                        av,
+                        a_crit,
+                        mrb,
+                    )
 
     @property
     def Jphoto(self) -> float:
@@ -1048,7 +1258,9 @@ class Junction:
         where J0_REFERENCE = 1e-3 A/cm^2 makes the power-law argument and
         J0ratio dimensionless. All currents remain in A/cm^2, with a log-domain
         fallback for numerical stability. Because Jdb depends on temperature,
-        J0 automatically tracks changes in TC.
+        J0 automatically tracks changes in TC with a radiative-like temperature
+        prefactor (~ T^(1.04/n), corresponding to a temperature-independent
+        external radiative efficiency for fixed J0ratio).
         """
 
         if (isinstance(self.n, np.ndarray)) and (isinstance(self.J0ratio, np.ndarray)):
@@ -1091,12 +1303,14 @@ class Junction:
             "nVth": n[good] * Vthf,
             "J0": J0[good],
             "Vth": Vthf,
+            "Eg": float(self.Eg),
             "Gsh": float(self.Gsh),
             "Rser": float(self.Rser),
             "Jdb": Jdbf,
             "gamma": float(self.gamma),
             "notdiode": bool(self.notdiode()),
             "rbb": rbb,
+            "vlo": _reverse_limit(rbb),
             # plain-python twins for the fast scalar residual
             "J0f": [float(x) for x in J0[good]],
             "ninv": [1.0 / (float(ni) * Vthf) for ni in n[good]],
@@ -1148,12 +1362,14 @@ class Junction:
             "nVth": n[keep][None, :] * Vthr[:, None],
             "J0": J0,
             "Vth": Vthr,
+            "Eg": Eg,
             "Gsh": float(self.Gsh),
             "Rser": float(self.Rser),
             "Jdb": Jdbr,
             "gamma": float(self.gamma),
             "notdiode": notdiode,
             "rbb": rbb,
+            "vlo": _reverse_limit(rbb),
         }
 
     def _vdiode_arr(self, Jtot: np.ndarray, state: dict | None = None) -> np.ndarray:
@@ -1161,8 +1377,9 @@ class Junction:
 
         Vectorized core of Vdiode (no Rser, no Jphoto added here).
         Returns the junction-frame voltages; np.nan where no root is bracketed
-        in [-VLIM_REVERSE, VLIM_FORWARD] (matching the historical brentq
-        ValueError -> nan behaviour).
+        in [-VLIM_REVERSE, max(VLIM_FORWARD, Eg + 1)] (matching the historical
+        brentq ValueError -> nan behaviour). A Bishop breakdown with Vrb > 0
+        raises the lower end to just above -Vrb (see _reverse_limit).
 
         ``state`` is the junction's own operating condition, shared by all
         elements (_solver_state, the default), or a per-row state
@@ -1184,6 +1401,8 @@ class Junction:
                 out.flat[k] = _vjunction_scalar(float(Jtot.flat[k]), st)
             return out
 
+        vhi = max(VLIM_FORWARD, float(st.get("Eg", 0.0)) + 1.0)
+        vlo = st.get("vlo", -VLIM_REVERSE)
         if Jtot.size < SCALAR_SOLVE_CUTOFF:
             out = np.empty_like(Jtot)
             for k in range(Jtot.size):
@@ -1192,14 +1411,14 @@ class Junction:
                     out.flat[k] = np.nan
                     continue
                 try:
-                    out.flat[k] = brentq(lambda V: Jt - _recomb_current_scalar(V, st), -VLIM_REVERSE, VLIM_FORWARD, xtol=XTOL_SOLVE, rtol=EPSREL, maxiter=MAXITER)
+                    out.flat[k] = brentq(lambda V: Jt - _recomb_current_scalar(V, st), vlo, vhi, xtol=XTOL_SOLVE, rtol=EPSREL, maxiter=MAXITER)
                 except ValueError:
                     out.flat[k] = np.nan
             return out
 
         res = elementwise.find_root(
             lambda V, Jt: Jt - _recomb_current(V, st),
-            (np.full_like(Jtot, -VLIM_REVERSE), np.full_like(Jtot, VLIM_FORWARD)),
+            (np.full_like(Jtot, vlo), np.full_like(Jtot, vhi)),
             args=(Jtot,),
         )
         return np.where(res.success, res.x, np.nan)
@@ -1223,6 +1442,12 @@ class Junction:
         if st["notdiode"]:
             return np.zeros_like(Vtot)
         Jph = np.broadcast_to(np.asarray(Jphoto, dtype=np.float64), Vtot.shape)
+        vhi = max(VLIM_FORWARD, float(st.get("Eg", 0.0)) + 1.0)
+        vlo = st.get("vlo", -VLIM_REVERSE)
+        if Rs == 0.0:
+            with np.errstate(invalid="ignore"):
+                inside = (Vtot >= vlo) & (Vtot <= vhi) & np.isfinite(Jph)
+            return np.where(inside, Vtot, np.nan)
 
         if not _legacy_solver():
             if Vtot.size >= SCALAR_SOLVE_CUTOFF:
@@ -1231,10 +1456,7 @@ class Junction:
             for k in range(Vtot.size):
                 Vt = float(Vtot.flat[k])
                 Jp = float(Jph.flat[k])
-                if Rs == 0.0:
-                    out.flat[k] = Vt if (-VLIM_REVERSE <= Vt <= VLIM_FORWARD and math.isfinite(Jp)) else np.nan
-                else:
-                    out.flat[k] = _vjunction_scalar(Jp, st, 1.0 / Rs, Vt)
+                out.flat[k] = _vjunction_scalar(Jp, st, 1.0 / Rs, Vt)
             return out
 
         if Vtot.size < SCALAR_SOLVE_CUTOFF:
@@ -1246,14 +1468,14 @@ class Junction:
                     out.flat[k] = np.nan
                     continue
                 try:
-                    out.flat[k] = brentq(lambda V: Vt - V + (Jp - _recomb_current_scalar(V, st)) * Rs, -VLIM_REVERSE, VLIM_FORWARD, xtol=XTOL_SOLVE, rtol=EPSREL, maxiter=MAXITER)
+                    out.flat[k] = brentq(lambda V: Vt - V + (Jp - _recomb_current_scalar(V, st)) * Rs, vlo, vhi, xtol=XTOL_SOLVE, rtol=EPSREL, maxiter=MAXITER)
                 except ValueError:
                     out.flat[k] = np.nan
             return out
 
         res = elementwise.find_root(
             lambda V, Vt, Jp: Vt - V + (Jp - _recomb_current(V, st)) * Rs,
-            (np.full_like(Vtot, -VLIM_REVERSE), np.full_like(Vtot, VLIM_FORWARD)),
+            (np.full_like(Vtot, vlo), np.full_like(Vtot, vhi)),
             args=(Vtot, Jph),
         )
         return np.where(res.success, res.x, np.nan)
@@ -1261,22 +1483,19 @@ class Junction:
     def Jem(self, Vmid: float) -> float:
         r"""[A/cm^2] light emitted from the junction (current density).
 
-        Two physically distinct contributions per Lan and Green,
-        Appl. Phys. Lett. 106, 263902 (2015), Eqs. 2a-2b:
+        Combines electroluminescence (Geisz et al., IEEE J. Photovolt. 5,
+        1827, 2015, Eqs. 2-3) and voltage-independent photoluminescence
+        (Lan and Green, Appl. Phys. Lett. 106, 263902, 2015, Eqs. 2a-2b):
 
-        * EL (Rau reciprocity): carriers that reach the junction and
-          recombine radiatively across the depletion region.  Scales
-          as Jdb * (exp(Vmid/Vth) - 1) and vanishes at short circuit.
-          Suppressed for Vmid <= 0 because the diode-equation form
-          would otherwise describe absorption, not emission.
-        * PL (Lan and Green): carriers that recombine radiatively in
-          the absorber before reaching the junction.  Scales as
-          gamma * Jphoto and is present at every bias, including
-          short circuit and reverse bias.  Tayagaki et al. 2018
-          (Fig. 5b) shows this nonzero V_top=0 baseline experimentally.
+        * EL (Rau reciprocity / Geisz Eq. 3): carriers that reach the junction
+          and recombine radiatively. Scales as Jdb * (exp(Vmid/Vth) - 1) for
+          Vmid > 0 and is suppressed for Vmid <= 0.
+        * PL (Lan and Green): carriers that recombine radiatively before
+          collection. Scales as gamma * Jphoto at every bias, including short
+          circuit and reverse bias (Tayagaki et al. 2018, Fig. 5b).
 
-        With the default gamma = 0 the PL term is zero, so Jem
-        reduces to the pure-EL form and Jem(Vmid <= 0) == 0.
+        With the default gamma = 0 the PL term is zero, so Jem reduces to the
+        Geisz Eq. 3 pure-EL form and Jem(Vmid <= 0) == 0.
         """
         # PL contribution is voltage-independent (still active at V <= 0).
         Jem = self.gamma * self.Jphoto  # PL Lan and Green
@@ -1303,16 +1522,18 @@ class Junction:
 
     def Jmultidiodes(self, Vdiode: float) -> float:
         """
-        calculate recombination current density from
-        multiple diodes self.n, self.J0 numpy.ndarray
-        two-diodes:
-        n  = [1, 2]  #two diodes
-        J0 = [10,10]  #poor cell
-        detailed balance:
-        n  = [1]
-        J0 = [1]
-        three-diodes
-        n = [1, 1.8, (2/3)]
+        Calculate recombination current density from multiple diodes
+        (self.n, self.J0).
+
+        Examples:
+        - two-diode: n = [1.0, 2.0], J0ratio = [10.0, 10.0]
+        - single-junction detailed balance (perfect back reflector, no LC):
+          n = [1.0], J0ratio = [1.0]
+        - coupled radiative limit for an LC emitter feeding a lower junction
+          with coupling beta (Geisz 2015 Eq. 9, Structure I):
+          n = [1.0], J0ratio = [1.0 + beta] (or set receiver beta = 0 for a
+          reflector-separated stack)
+        - three-diode: n = [1.0, 1.8, 2/3]
         """
         Jrec = np.float64(0.0)
         for ideality_factor, saturation_current in zip(self.n, self.J0):
@@ -1326,19 +1547,14 @@ class Junction:
 
     def JshuntRBB(self, Vdiode: float) -> float:
         """
-        return shunt + reverse-bias breakdown current
+        Return shunt + reverse-bias breakdown current density [A/cm^2]:
 
-            RBB_dict={'method':None}   #None
-
-            RBB_dict={'method':'JFG', mrb'':10., 'J0rb':1., 'Vrb':0.}
-
-            RBB_dict={'method':'bishop','mrb'':3.28, 'avalanche':1, 'Vrb':-5.5}
-
-            RBB_dict={'method':'pvmismatch','ARBD':arbd,'BRBD':brbd,'VRBD':vrb,'NRBD':nrbd:
-
-        Vdiode without Rs
-        Vth = kT
-        Gshunt
+        - RBB_dict={'method': None}
+        - RBB_dict={'method': 'JFG', 'mrb': 10.0, 'J0rb': 0.5, 'Vrb': 0.0}
+          Geisz 2015 Eq. 14 has onset at Vrb = 0.0 (continuous). For Vrb < 0,
+          the unshifted exponential is gated at Vdiode <= Vrb, so Vrb acts as
+          an ideal-breakdown voltage clamp with a step discontinuity there.
+        - RBB_dict={'method': 'bishop', 'mrb': 3.28, 'avalanche': 1.0, 'Vrb': -5.5}
         """
 
         RBB_dict = self.RBB_dict
@@ -1384,14 +1600,13 @@ class Junction:
 
     def Vdiode(self, Jdiode: float | np.ndarray) -> float | np.ndarray:
         """
-        Jtot = Jphoto + J
-        for junction self of class Junction
-        return Vdiode(Jtot)
-        no Rseries here
+        Solve for the diode voltage Vdiode(Jtot) with Jtot = Jphoto + Jdiode
+        (no series resistance Rser). Returns np.nan where no solution exists
+        inside [-VLIM_REVERSE, max(VLIM_FORWARD, Eg + 1)]; with Bishop
+        breakdown and Vrb > 0 the lower end is just above -Vrb.
 
-        ``Jdiode`` may be a scalar (returns float, historical behaviour) or an
-        ndarray (returns an ndarray of the same shape, solved in one
-        vectorized call).
+        'Jdiode' may be a scalar (returns float) or an ndarray (returns an
+        ndarray of the same shape, solved in one vectorized call).
         """
         st = self._solver_state()
         scalar = np.ndim(Jdiode) == 0
@@ -1417,13 +1632,14 @@ class Junction:
 
     def Vmid(self, Vtot: float | np.ndarray) -> float | np.ndarray:
         """
-        see Vparallel
-        find intermediate voltage in a single junction diode with series resistance
-        Given Vtot=Vparallel + Rser * Jparallel
+        Solve for the junction midpoint voltage Vmid behind series resistance
+        Rser given terminal voltage Vtot = Vmid - Rser * Jparallel(Vmid).
+        Returns np.nan where no solution exists inside
+        [-VLIM_REVERSE, max(VLIM_FORWARD, Eg + 1)]; with Bishop breakdown and
+        Vrb > 0 the lower end is just above -Vrb.
 
-        ``Vtot`` may be a scalar (returns float, historical behaviour) or an
-        ndarray (returns an ndarray of the same shape, solved in one
-        vectorized call).
+        'Vtot' may be a scalar (returns float) or an ndarray (returns an
+        ndarray of the same shape, solved in one vectorized call).
         """
         st = self._solver_state()
         scalar = np.ndim(Vtot) == 0

@@ -56,7 +56,7 @@ class Multi2T:
         if Eg_list is None:
             Eg_list = [1.8, 1.4]
         if n is None:
-            n = [1, 2]
+            n = [1.0, 2.0]
 
         self.Vpoints = None
         self.Ipoints = None
@@ -224,26 +224,57 @@ class Multi2T:
     #                 cntrl.click()  # click button
 
     def set(self, **kwargs):
-        # controlled update of Multi2T attributes
+        """Controlled update of Multi2T attributes.
 
-        # with self.debugout:
-        #     print("Mset: ", list(kwargs.keys()))
+        Scalar junction attributes accept a scalar/0-d array (applied to all
+        junctions) or a sequence of length 'njuncs' (one per junction).
+        Diode array attributes ('n', 'J0ratio') accept either a 1-D diode list
+        (applied to all junctions) or a length-'njuncs' sequence of per-junction
+        diode lists (e.g. 'n=[[1.0], [1.0, 2.0]]').
 
+        Atomic: if any keyword is rejected, neither the device nor any of its
+        junctions is changed.
+        """
+        snapshots = [(obj, junction._snapshot_attrs(obj)) for obj in (self, *self.j)]
+        try:
+            self._set_items(kwargs)
+        except Exception:
+            for obj, snapshot in snapshots:
+                junction._restore_attrs(obj, snapshot)
+            raise
+
+    def _set_items(self, kwargs: dict) -> None:
+        """Apply the set() keywords, without rollback."""
         # junction kwargs
         jlist = Junction.ATTR + Junction.ARY_ATTR
         jkwargs = {key: kwargs.pop(key) for key in jlist if key in kwargs}  # Filter keys from kwargs that are junction attributes.
         if len(jkwargs) > 0:
-            # if called_from: jkwargs['called_from'] = called_from # pass it on to the junction.set()
+            per_junc_ary = {}
+            for key, value in jkwargs.items():
+                if key in Junction.ATTR:
+                    if not np.isscalar(value) and np.ndim(value) > 0:
+                        if len(value) != self.njuncs:
+                            raise ValueError(f"Multi2T.set: {key!r} length ({len(value)}) must match njuncs ({self.njuncs})")
+                elif key in Junction.ARY_ATTR:
+                    if not np.isscalar(value) and not (isinstance(value, np.ndarray) and value.ndim < 2):
+                        try:
+                            if len(value) == self.njuncs and all(not np.isscalar(v) and hasattr(v, "__len__") for v in value):
+                                per_junc_ary[key] = True
+                        except TypeError:
+                            pass
+
             for i, junc in enumerate(self.j):
                 jikwargs = {}  # empty
                 for key, value in jkwargs.items():
-                    if key in Junction.ATTR and not np.isscalar(value):
-                        # dimension mismatch possibly from self.proplist()
+                    if key in Junction.ATTR:
+                        if np.isscalar(value) or np.ndim(value) == 0:
+                            jikwargs[key] = value.item() if isinstance(value, np.ndarray) else value
+                        else:
+                            jikwargs[key] = value[i]
+                    elif per_junc_ary.get(key, False):
                         jikwargs[key] = value[i]
                     else:
                         jikwargs[key] = value
-                # with self.debugout:
-                #     print("M2J[" + str(i) + "]: ", jikwargs)
                 junc.set(**jikwargs)
 
         # remaining Multi2T kwargs
@@ -398,7 +429,9 @@ class Multi2T:
         positive = photo > 0.0
         Isc = np.abs(self._I2T_points(V2T, np.zeros(nrows), np.where(positive, 0.0, photo), np.where(positive, photo, 0.0)))
 
-        Imp, Pmp, _ = junction._maximize_rows(lambda current, index: -V2T(current, index) * current, -Isc, np.zeros(nrows), rows, pnts, 5)
+        has_rbb = any(junc.RBB_dict.get("method") is not None for junc in self.j)
+        first_pnts = max(pnts, 101) if has_rbb else None
+        Imp, Pmp, _ = junction._maximize_rows(lambda current, index: -V2T(current, index) * current, -Isc, np.zeros(nrows), rows, pnts, 5, first_pnts=first_pnts)
         Vmp = V2T(Imp, rows)
         return {"Voc": Voc, "Isc": Isc, "Vmp": Vmp, "Imp": np.abs(Imp), "Pmp": Pmp}
 
@@ -409,12 +442,9 @@ class Multi2T:
         (Jphoto + sum(J0)) * area. A series stack is limited by the
         smallest of those absolute currents.
         """
-        # Voc = self.Voc()  # this also calculates JLC at Voc TODO Remove
-        J0s = self.proplist("J0")
-        Jphotos = self.proplist("Jphoto")
-        Jmaxs = Jphotos + np.sum(J0s, axis=1)
+        Jmaxs = [float(junc.Jphoto) + float(np.sum(junc.J0)) for junc in self.j]
         areas = self.proplist("totalarea")
-        Imax = min([j * a for j, a in zip(Jmaxs, areas)])
+        Imax = min([j * float(a) for j, a in zip(Jmaxs, areas)])
         return Imax
 
     def _I2T_root_target(self, current, target_voltage):
@@ -490,7 +520,7 @@ class Multi2T:
             idx = idx.astype(np.intp)
             V = V2T(current, idx)
             # no solution: so far in reverse or in forward that a junction leaves its voltage range
-            V = np.where(np.isfinite(V), V, np.where(current > I_floor[idx], 1.0e3, -1.0e3))
+            V = np.where(np.isfinite(V), V, np.where(current > I_floor[idx], 1.0e12, -1.0e12))
             return V - voltage[idx]
 
         lo = np.full(npts, np.nan)
@@ -729,21 +759,74 @@ class Multi2T:
                 axr = ax.twinx()
                 axr.set_ylabel("Power (W)", c="cyan")
 
-            for _ in range(5):
-                Itemp = np.linspace(Ilo, Ihi, pnts)
-                Vtemp = np.asarray(self.V2T(Itemp), dtype=np.float64)
-                Ptemp = -Vtemp * Itemp
-                nmax = np.argmax(Ptemp)
+            has_rbb = any(junc.RBB_dict.get("method") is not None for junc in self.j)
+            if has_rbb:
+                n0 = max(pnts, 101)
+                I0 = np.linspace(Ilo, Ihi, n0)
+                V0 = np.asarray(self.V2T(I0), dtype=np.float64)
+                P0 = -V0 * I0
+                P0_clean = np.where(np.isfinite(P0), P0, -np.inf)
                 if bplot:
-                    ax.plot(Vtemp, Itemp, marker=".", ls="")
-                    axr.plot(Vtemp, Ptemp, marker=".", ls="", c="cyan")
-                    print(nmax, Ilo, Ihi, Ptemp[nmax])
-                Ilo = Itemp[max(0, (nmax - 1))]
-                Ihi = Itemp[min((nmax + 1), (pnts - 1))]
+                    ax.plot(V0, I0, marker=".", ls="")
+                    axr.plot(V0, P0, marker=".", ls="", c="cyan")
+                starts = [
+                    k
+                    for k in range(1, n0 - 1)
+                    if np.isfinite(P0[k - 1]) and np.isfinite(P0[k]) and np.isfinite(P0[k + 1]) and P0_clean[k] > P0_clean[k - 1] and P0_clean[k] >= P0_clean[k + 1] and P0_clean[k] > 0.0
+                ]
+                nmax0 = int(np.argmax(P0_clean))
+                if nmax0 not in starts and np.isfinite(P0_clean[nmax0]):
+                    starts.append(nmax0)
+                if not starts:
+                    starts = [0]
 
-            Pmp = Ptemp[nmax]
-            Vmp = Vtemp[nmax]
-            Imp = abs(Itemp[nmax])
+                best_P = -np.inf
+                best_V = np.nan
+                best_I = np.nan
+                for k0 in starts:
+                    clo = I0[max(0, k0 - 1)]
+                    chi = I0[min(k0 + 1, n0 - 1)]
+                    if P0_clean[k0] > best_P:
+                        best_P = float(P0_clean[k0])
+                        best_V = float(V0[k0])
+                        best_I = float(I0[k0])
+                    for _ in range(4):
+                        Itemp = np.linspace(clo, chi, pnts)
+                        Vtemp = np.asarray(self.V2T(Itemp), dtype=np.float64)
+                        Ptemp = -Vtemp * Itemp
+                        P_clean = np.where(np.isfinite(Ptemp), Ptemp, -np.inf)
+                        nmax = int(np.argmax(P_clean))
+                        if bplot:
+                            ax.plot(Vtemp, Itemp, marker=".", ls="")
+                            axr.plot(Vtemp, Ptemp, marker=".", ls="", c="cyan")
+                            print(nmax, clo, chi, Ptemp[nmax])
+                        if P_clean[nmax] > best_P:
+                            best_P = float(P_clean[nmax])
+                            best_V = float(Vtemp[nmax])
+                            best_I = float(Itemp[nmax])
+                        clo = Itemp[max(0, nmax - 1)]
+                        chi = Itemp[min(nmax + 1, pnts - 1)]
+                Pmp = best_P if np.isfinite(best_P) else np.nan
+                Vmp = best_V
+                Imp = abs(best_I) if np.isfinite(best_I) else np.nan
+            else:
+                for _ in range(5):
+                    Itemp = np.linspace(Ilo, Ihi, pnts)
+                    Vtemp = np.asarray(self.V2T(Itemp), dtype=np.float64)
+                    Ptemp = -Vtemp * Itemp
+                    P_clean = np.where(np.isfinite(Ptemp), Ptemp, -np.inf)
+                    nmax = int(np.argmax(P_clean))
+                    if bplot:
+                        ax.plot(Vtemp, Itemp, marker=".", ls="")
+                        axr.plot(Vtemp, Ptemp, marker=".", ls="", c="cyan")
+                        print(nmax, Ilo, Ihi, Ptemp[nmax])
+                    Ilo = Itemp[max(0, (nmax - 1))]
+                    Ihi = Itemp[min((nmax + 1), (pnts - 1))]
+
+                Pmp = Ptemp[nmax] if np.isfinite(P_clean[nmax]) else np.nan
+                Vmp = Vtemp[nmax]
+                Imp = abs(Itemp[nmax])
+
             FF = abs((Vmp * Imp) / (Voc * Isc))
             if not np.isfinite(Pmp):
                 # no finite maximum power in the scan (np.argmax returns the first nan,
@@ -758,9 +841,9 @@ class Multi2T:
 
         # Pmp_density [W/cm^2] uses the device reference area (max junction
         # totalarea), matching how Rs2T is normalised and how EY.Meteo
-        # reports power_density. Multiply by an irradiance W/cm^2 (e.g.
+        # reports power_density. Divide by an irradiance in W/cm^2 (e.g.
         # 0.1 for 1 sun AM1.5G) to obtain efficiency; or call
-        # Multi2T.efficiency() which integrates a reference spectrum.
+        # Multi2T.efficiency() which normalises by a reference spectrum.
         Pmp_density = Pmp / self.totalarea if np.isfinite(Pmp) else np.nan
 
         mpp_dict = {
@@ -780,23 +863,33 @@ class Multi2T:
 
         return mpp_dict
 
-    def efficiency(self, Pspec="global", xspec=None):
-        """Power-conversion efficiency under a reference spectrum.
+    AM0_PIN_WM2: ClassVar[float] = 1366.1  # ASTM E490-00a AM0 solar constant [W/m^2]
+
+    def efficiency(self, Pspec="global", xspec=None, Pin: float | None = None):
+        r"""Power-conversion efficiency under a reference spectrum.
 
         Pmp is divided by the incident power that strikes the device
         footprint (device totalarea = max junction totalarea), which
-        matches the convention used in EY.Meteo.
+        matches the convention used in EY.Meteo. Note that 'Jext' on each
+        junction is not modified and must already correspond to *Pspec*.
 
         Parameters
         ----------
         Pspec : str or array-like, optional
-            Reference spectrum. Either an ASTM key recognised by
-            PintMD ('space', 'global',
+            Reference spectrum. Either an ASTM key ('space', 'global',
             'direct') or a spectral irradiance array [W/m^2/nm].
-            Default 'global' (AM1.5G, ~1000 W/m^2 \approx 0.1 W/cm^2).
+            Default 'global' (AM1.5G, ~1000.4 W/m^2 \approx 0.1 W/cm^2).
+            For 'space' (AM0), the full-spectrum ASTM E490-00a solar constant
+            (1366.1 W/m^2) is used unless overridden by *Pin*, also when
+            *xspec* is given (the 280-4000 nm table integrates to only
+            1347.9 W/m^2).
         xspec : array-like, optional
             Wavelength grid [nm] for *Pspec*. Defaults to the ASTM
-            reference grid (pvcircuit.qe.wvl).
+            reference grid (pvcircuit.qe.wvl). Not used for 'space'.
+        Pin : float, optional
+            Explicit broadband incident irradiance [W/m^2] overriding
+            spectral integration (e.g. 1000.0 for nominal STC or 1361.0 for
+            IAU TSI).
 
         Returns
         -------
@@ -808,16 +901,30 @@ class Multi2T:
         # imports multi2T before qe.
         from pvcircuit import qe
 
-        if xspec is None:
-            Pin_Wm2 = qe.PintMD(Pspec)
+        if Pin is not None:
+            Pin_Wm2 = float(Pin)
+        elif isinstance(Pspec, str):
+            if Pspec not in qe.refnames:
+                raise ValueError(f"Unknown reference spectrum {Pspec!r}; expected one of {qe.refnames} or a spectral irradiance array.")
+            if Pspec == "space":
+                Pin_Wm2 = self.AM0_PIN_WM2
+            elif xspec is None:
+                Pin_Wm2 = float(qe.PintMD(Pspec))
+            else:
+                Pin_Wm2 = float(qe.PintMD(Pspec, xspec))
+        elif xspec is None:
+            Pin_Wm2 = float(qe.PintMD(Pspec))
         else:
-            Pin_Wm2 = qe.PintMD(Pspec, xspec)
-        Pin = np.asarray(Pin_Wm2, dtype=np.float64) / 1e4  # W/m^2 -> W/cm^2
+            Pin_Wm2 = float(qe.PintMD(Pspec, xspec))
+
+        if Pin_Wm2 <= 0.0 or not math.isfinite(Pin_Wm2):
+            raise ValueError(f"Incident irradiance Pin must be positive and finite, got {Pin_Wm2} W/m^2")
+        Pin_Wcm2 = Pin_Wm2 / 1e4  # W/m^2 -> W/cm^2
 
         Pmp = self.MPP()["Pmp"]
         if not np.isfinite(Pmp):
             return np.nan
-        return float(Pmp / (Pin * self.totalarea))
+        return float(Pmp / (Pin_Wcm2 * self.totalarea))
 
     # def controls(self):
     #     """

@@ -167,28 +167,41 @@ class Tandem3T:
           ``set(n=[[1.5], [1.0]])`` -> ``top.n = [1.5]``, ``bot.n = [1.0]``.
 
         Use ``self.top.set(...)`` / ``self.bot.set(...)`` when in doubt.
+
+        Atomic: if any keyword is rejected, neither the device nor its
+        junctions is changed.
         """
+        snapshots = [(obj, junction._snapshot_attrs(obj)) for obj in (self, self.top, self.bot)]
+        try:
+            self._set_items(kwargs)
+        except Exception:
+            for obj, snapshot in snapshots:
+                junction._restore_attrs(obj, snapshot)
+            raise
 
-        # with self.debugout:
-        #     print("Tset: ", list(kwargs.keys()))
-
+    def _set_items(self, kwargs: dict) -> None:
+        """Apply the set() keywords, without rollback."""
         # junction kwargs
         jlist = Junction.ATTR.copy() + Junction.ARY_ATTR.copy()
         jkwargs = {key: kwargs.pop(key) for key in jlist if key in kwargs}
         if len(jkwargs) > 0:
+            for key, value in jkwargs.items():
+                if key in Junction.ATTR and not np.isscalar(value) and np.ndim(value) > 0:
+                    if len(value) != 2:
+                        raise ValueError(f"Tandem3T.set: {key!r} length ({len(value)}) must be 2")
             for i, junc in enumerate(["top", "bot"]):
                 jikwargs = {}  # empty
                 for key, value in jkwargs.items():
-                    if key in Junction.ATTR and not np.isscalar(value):
-                        # dimension mismatch possibly from self.proplist()
-                        jikwargs[key] = value[i]
+                    if key in Junction.ATTR:
+                        if np.isscalar(value) or np.ndim(value) == 0:
+                            jikwargs[key] = value.item() if isinstance(value, np.ndarray) else value
+                        else:
+                            jikwargs[key] = value[i]
                     elif key in Junction.ARY_ATTR and _is_per_junction_list(value):
                         # nested list: one diode array per junction
                         jikwargs[key] = value[i]
                     else:
                         jikwargs[key] = value
-                # with self.debugout:
-                #     print("T2J[" + str(i) + "]: ", jikwargs)
                 getattr(self, junc).set(**jikwargs)
 
         # remaining Multi2T kwargs
@@ -315,7 +328,8 @@ class Tandem3T:
 
         # Kirchhoff filter (nan inputs also fail this test -> nan outputs)
         with np.errstate(invalid="ignore"):
-            valid = np.abs(Ito + Iro + Izo) <= 1e-5
+            current_scale = np.abs(Ito) + np.abs(Iro) + np.abs(Izo)
+            valid = np.abs(Ito + Iro + Izo) <= 1e-4 * current_scale + 1e-8 * max(float(self.totalarea), 1e-6)
 
         # input current densities
         # Jt, Jr, Jz are current densities [A/cm^2] obtained from the
@@ -507,29 +521,31 @@ class Tandem3T:
 
             Vzt = iv3T.Vzt.flat[i]
             Vrz = iv3T.Vrz.flat[i]
-            # initial guess Rz=0 -> Vz=0
-            self.Rz = 0.0
-            top.Rser = Rt + Rz
-            bot.Rser = Rr + Rz
-            Vz = 0.0
-            Vt = Vz - Vzt
-            Vr = Vrz + Vz
-            temp3T.set(Vzt=Vz, Vrz=Vr, Vtr=Vt)
-            self.J3Tabs(temp3T)
+            if not (math.isfinite(Vzt) and math.isfinite(Vrz)):
+                continue
+            # initial guess Rz=0 -> Vz=0 (restore resistances even if J3Tabs raises)
+            try:
+                self.Rz = 0.0
+                top.Rser = Rt + Rz
+                bot.Rser = Rr + Rz
+                Vz = 0.0
+                Vt = Vz - Vzt
+                Vr = Vrz + Vz
+                temp3T.set(Vzt=Vz, Vrz=Vr, Vtr=Vt)
+                self.J3Tabs(temp3T)
 
-            # J3Tabs writes ABSOLUTE currents [A] to temp3T.(Iro,Izo,Ito);
-            # convert back to current density [A/cm^2] for the Rz [Ohm*cm^2]
-            # voltage drop calculation. The output assignment at the bottom
-            # of this loop multiplies by area to recover absolute currents.
-            Jro = temp3T.Iro[0] / bot.totalarea
-            Jzo = temp3T.Izo[0] / self.totalarea
-            Jto = temp3T.Ito[0] / top.totalarea
-            Vzmax = Jzo * Rz
-
-            # reset resistance
-            self.Rz = Rz
-            top.Rser = Rt
-            bot.Rser = Rr
+                # J3Tabs writes ABSOLUTE currents [A] to temp3T.(Iro,Izo,Ito);
+                # convert back to current density [A/cm^2] for the Rz [Ohm*cm^2]
+                # voltage drop calculation. The output assignment at the bottom
+                # of this loop multiplies by area to recover absolute currents.
+                Jro = temp3T.Iro[0] / bot.totalarea
+                Jzo = temp3T.Izo[0] / self.totalarea
+                Jto = temp3T.Ito[0] / top.totalarea
+                Vzmax = Jzo * Rz
+            finally:
+                self.Rz = Rz
+                top.Rser = Rt
+                bot.Rser = Rr
 
             # iterate with varying Vz
             # bracket
@@ -545,7 +561,6 @@ class Tandem3T:
 
             count = 0
             while dIlo * dIhi > 0.0:
-                # print('I3Trel not bracket', i, count, Vlo, Vhi, dIlo, dIhi)
                 Vlo -= 0.1
                 Vhi += 0.1
                 dIlo = self._dI(Vlo, Vzt, Vrz, temp3T)
@@ -554,28 +569,27 @@ class Tandem3T:
                     break
                 count += 1
 
-            if dIlo * dIhi > 0.0:
-                # print('I3Trel not bracket', i, count, Vlo, Vhi, dIlo, dIhi)
-                # i += 1
+            if not (math.isfinite(dIlo) and math.isfinite(dIhi)) or dIlo * dIhi > 0.0:
                 continue
 
             if Rz > 0.0:
-                try:  # find Vz that satisfies dJ(Vz) = Jro+Jzo+Jto = 0
+                try:  # find Vz that satisfies dI(Vz) = Iro+Izo+Ito = 0
+                    Az = max(float(self.totalarea), 1e-12)
+                    xtol_vz = max(junction.XTOL_SOLVE * min(1.0, Rz / Az), 1e-15 * max(1.0, abs(Vlo), abs(Vhi)))
                     Vz = brentq(
                         self._dI,
                         Vlo,
                         Vhi,
                         args=(Vzt, Vrz, temp3T),
-                        xtol=junction.XTOL_SOLVE,
+                        xtol=xtol_vz,
                         rtol=junction.EPSREL,
                         maxiter=junction.MAXITER,
                         full_output=False,
                         disp=True,
                     )
-                    # dI0 = self._dI(Vz,Vzt,Vrz,temp3T)
+                    # Re-evaluate at the returned root Vz so temp3T holds the exact root currents
+                    self._dI(Vz, Vzt, Vrz, temp3T)
 
-                    # temp3T.(Iro,Izo,Ito) hold absolute currents [A] after
-                    # the brentq's final _dI -> J3Tabs evaluation.
                     Iro_abs = temp3T.Iro[0]
                     Izo_abs = temp3T.Izo[0]
                     Ito_abs = temp3T.Ito[0]
@@ -637,8 +651,10 @@ class Tandem3T:
         Rz = float(self.Rz)
         scale_tb = At / Ar if At < Ar else 1.0
         per_point = st_t["J0"].ndim == 2  # one operating condition per point
-        VL = junction.VLIM_REVERSE
-        VF = junction.VLIM_FORWARD
+        VL_t = st_t.get("vlo", -junction.VLIM_REVERSE)
+        VL_b = st_b.get("vlo", -junction.VLIM_REVERSE)
+        VF_t = np.maximum(junction.VLIM_FORWARD, np.asarray(st_t.get("Eg", 0.0), dtype=np.float64) + 1.0)
+        VF_b = np.maximum(junction.VLIM_FORWARD, np.asarray(st_b.get("Eg", 0.0), dtype=np.float64) + 1.0)
 
         ut = ut.copy()
         ur = ur.copy()
@@ -656,8 +672,11 @@ class Tandem3T:
             if per_point:
                 sa_t, sa_b = junction._state_take(st_t, a), junction._state_take(st_b, a)
                 bt, bb = base_t[a], base_b[a]
+                vft = VF_t[a] if np.ndim(VF_t) > 0 else VF_t
+                vfb = VF_b[a] if np.ndim(VF_b) > 0 else VF_b
             else:
                 sa_t, sa_b, bt, bb = st_t, st_b, base_t, base_b
+                vft, vfb = VF_t, VF_b
             with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
                 Dt = junction._recomb_current(uta, sa_t)
                 Dtp = junction._recomb_current_deriv(uta, sa_t)
@@ -701,8 +720,8 @@ class Tandem3T:
             d1 = np.clip(d1, -0.5, 0.5)
             d2 = np.clip(d2, -0.5, 0.5)
             d3 = np.clip(d3, -1.0, 1.0)
-            ut[a] = np.clip(uta + d1, -VL, VF)
-            ur[a] = np.clip(ura + d2, -VL, VF)
+            ut[a] = np.clip(uta + d1, VL_t, vft)
+            ur[a] = np.clip(ura + d2, VL_b, vfb)
             Vz[a] = np.clip(Vza + d3, -20.0, 20.0)
 
             done = (np.abs(d1) < 1e-10) & (np.abs(d2) < 1e-10) & (np.abs(d3) < 1e-10) & ~bad
@@ -956,12 +975,12 @@ class Tandem3T:
         """
         MPP for many operating conditions at once; see V3T_rows for the rows.
 
-        The maximum of the total power over both terminal currents (two
-        independent loads; with Rz = 0 that is four-terminal operation). The
-        currents are optimized in turn, as MPP does, until the power stops
-        changing; each turn scans the whole range of its current and refines
-        the maximum to the optimum, where MPP stops on a grid between the
-        short-circuit current and half of it.
+        The maximum of the total power over passive extracted currents of both
+        subcells in the generation quadrant (0 <= J_extracted <= Jphoto; with
+        Rz = 0 that is four-terminal operation). Note that for r-type cells
+        with a large Z-contact voltage drop (Rz * (Jt + Jb) >~ 1 V), an active
+        two-load maximum can forward-drive one junction outside this passive
+        generation window.
 
         Returns an IV3T with one point per row; np.nan where a row has no
         solution.
@@ -985,9 +1004,9 @@ class Tandem3T:
         y = np.zeros(nrows)
         P = np.full(nrows, -np.inf)
         active = rows
-        # strongly top-rich rows zig-zag along the ridge of luminescent coupling for
-        # about 40 turns; converged rows leave ``active`` after a few
-        for _ in range(40):
+        # Strongly top-rich rows zig-zag along the ridge of luminescent coupling;
+        # converged rows leave 'active' after a few turns.
+        for _ in range(400):
             if active.size == 0:
                 break
             # top junction with the bottom current held, then the reverse; the
@@ -997,9 +1016,52 @@ class Tandem3T:
             upper = base_b[active] + solve(x[active], np.zeros(active.size), active)[7]
             y[active], Pnew, _ = junction._maximize_rows(lambda u, idx: solve(x[idx], u, idx)[0], 0.0, np.maximum(upper, 0.0), active, pnts, 3)
             with np.errstate(invalid="ignore"):
-                changed = ~(np.abs(Pnew - P[active]) <= 1e-9 * np.abs(Pnew))
+                changed = ~(np.abs(Pnew - P[active]) <= 1e-11 * np.abs(Pnew))
             P[active] = Pnew
             active = active[changed]
+
+        # For s-type devices with Rz > 0, coordinate alternation from (0, 0) can
+        # stall off the narrow Izo ~ 0 valley when Rz is very large (near-floating Z).
+        # Compare against a ridge search seeded on the Izo = 0 (series) maximum and
+        # keep whichever point gives higher power.
+        if top.pn != bot.pn and self.Rz > 0.0:
+            area_ratio = float(top.totalarea) / float(bot.totalarea)
+            jlc_oc = solve(np.zeros(nrows), np.zeros(nrows), rows)[7]
+            cm_upper = np.maximum(np.minimum(base_t, (base_b + jlc_oc) / area_ratio), 0.0)
+            xr, Pr, _ = junction._maximize_rows(lambda u, idx: solve(u, u * area_ratio, idx)[0], 0.0, cm_upper, rows, pnts, 4)
+            yr = xr * area_ratio
+            with np.errstate(invalid="ignore"):
+                need_ridge = np.flatnonzero(np.isfinite(Pr) & (~np.isfinite(P) | (Pr > P * (1.0 - 1e-4))))
+            if need_ridge.size:
+                act_r = need_ridge
+                for _ in range(10):
+                    if act_r.size == 0:
+                        break
+                    # Optimize y at fixed x (updates Izo), then slide along constant Izo
+                    up_r = base_b[act_r] + solve(xr[act_r], np.zeros(act_r.size), act_r)[7]
+                    yr[act_r], Pr_new, _ = junction._maximize_rows(lambda u, idx: solve(xr[idx], u, idx)[0], 0.0, np.maximum(up_r, 0.0), act_r, pnts, 3)
+                    offset = yr[act_r] - xr[act_r] * area_ratio
+                    u_lo = np.clip(-offset / area_ratio, 0.0, np.maximum(base_t[act_r], 0.0))
+                    u_hi = np.clip((base_b[act_r] + jlc_oc[act_r] - offset) / area_ratio, u_lo, np.maximum(base_t[act_r], 0.0))
+                    xr_d, Pr_d, _ = junction._maximize_rows(
+                        lambda u, idx, off=offset, ar=act_r: solve(u, u * area_ratio + off[np.searchsorted(ar, idx)], idx)[0],
+                        u_lo,
+                        u_hi,
+                        act_r,
+                        pnts,
+                        3,
+                    )
+                    better_d = np.isfinite(Pr_d) & (Pr_d > Pr_new)
+                    xr[act_r] = np.where(better_d, xr_d, xr[act_r])
+                    yr[act_r] = np.where(better_d, xr_d * area_ratio + offset, yr[act_r])
+                    Pr_new = np.where(better_d, Pr_d, Pr_new)
+                    with np.errstate(invalid="ignore"):
+                        still = ~(np.abs(Pr_new - Pr[act_r]) <= 1e-10 * np.abs(Pr_new))
+                    Pr[act_r] = Pr_new
+                    act_r = act_r[still]
+            take_r = np.isfinite(Pr) & (~np.isfinite(P) | (Pr > P))
+            x = np.where(take_r, xr, x)
+            y = np.where(take_r, yr, y)
 
         _, Iro, Izo, Ito, Vzt, Vrz, Vtr, _ = solve(x, y, rows)
         return self._iv3T_rows("MPP", Iro, Izo, Ito, Vzt, Vrz, Vtr)
@@ -1068,6 +1130,52 @@ class Tandem3T:
         # return (temp3T.Iro[0], temp3T.Izo[0], temp3T.Ito[0])
         return temp3T
 
+    def _line_search(self, name, meastype, xkey, x0, x1, ykey, yconstraint, pnts, solve):
+        """Points of the iterative search for the maximum of Ptot along a constrained line.
+
+        Four scans of ``pnts`` points from ``x0`` to ``x1``, each zooming in
+        around the best point of the previous one; ``solve`` (V3T or I3Trel)
+        fills each line. With reverse breakdown on either junction, P can have
+        two lobes, so the first scan then has max(pnts, 101) points and every
+        interior local maximum on it is zoomed in on (as in Multi2T.MPP).
+        Returns an IV3T holding every scanned point.
+        """
+        out = IV3T(name=name, shape=0, meastype=meastype, area=self.lightarea)
+        ln = IV3T(name=name, meastype=meastype, area=self.lightarea)
+
+        def zoom(xa, xb, first):
+            for i in range(first, first + 4):
+                ln.line(xkey, xa, xb, pnts, ykey, yconstraint)
+                ln.name = name + "_" + str(i)
+                solve(ln)
+                out.append(ln)
+                xln = getattr(ln, xkey)
+                nmax = np.argmax(ln.Ptot)
+                xa = xln[max(0, (nmax - 1))]
+                xb = xln[min((nmax + 1), (pnts - 1))]
+
+        has_rbb = self.top.RBB_dict.get("method") is not None or self.bot.RBB_dict.get("method") is not None
+        if not has_rbb:
+            zoom(x0, x1, 0)
+            return out
+
+        n0 = max(pnts, 101)
+        ln.line(xkey, x0, x1, n0, ykey, yconstraint)
+        ln.name = name + "_dense"
+        solve(ln)
+        out.append(ln)
+        xd = np.array(getattr(ln, xkey), dtype=np.float64).ravel()
+        Pd = np.array(ln.Ptot, dtype=np.float64).ravel()
+        solved = np.isfinite(Pd) & (Pd != -100.0)  # IV3T.Pcalc marks an undefined power with -100
+        P_clean = np.where(solved, Pd, -np.inf)
+        starts = [k for k in range(1, n0 - 1) if solved[k - 1] and solved[k] and solved[k + 1] and P_clean[k] > P_clean[k - 1] and P_clean[k] >= P_clean[k + 1] and P_clean[k] > 0.0]
+        kmax = int(np.argmax(P_clean))
+        if kmax not in starts:
+            starts.append(kmax)
+        for k0 in starts:
+            zoom(xd[max(0, k0 - 1)], xd[min(k0 + 1, n0 - 1)], 1)
+        return out
+
     def VM(self, bot, top, pnts=11):
         """
         create VM constrained line for tandem3T
@@ -1080,8 +1188,6 @@ class Tandem3T:
         name = "VM" + sbot + stop
         meastype = "CZ"
         Voc3 = self.Voc3(meastype)  # find triple Voc point
-        ln = IV3T(name=name, meastype=meastype, area=self.lightarea)
-        lnout = IV3T(name=name, shape=0, meastype=meastype, area=self.lightarea)
         # Vzt and Vrz of a lit device have the sign of -top.pn and of bot.pn.
         # The polarity gives the orientation of the line also for a junction
         # without light, where the ratio of the two Voc is 0 / 0 or rounding.
@@ -1098,15 +1204,7 @@ class Tandem3T:
             x1 = Voc3.Vrz[0]
             ykey = "Vzt"
 
-        for i in range(4):  # focus on MPP
-            ln.line(xkey, x0, x1, pnts, ykey, yconstraint)
-            ln.name = name + "_" + str(i)
-            self.I3Trel(ln)
-            lnout.append(ln)
-            xln = getattr(ln, xkey)
-            nmax = np.argmax(ln.Ptot)
-            x0 = xln[max(0, (nmax - 1))]
-            x1 = xln[min((nmax + 1), (pnts - 1))]
+        lnout = self._line_search(name, meastype, xkey, x0, x1, ykey, yconstraint, pnts, self.I3Trel)
 
         lnout.sort(xkey)  # sort for nice line
         # find useless values
@@ -1149,42 +1247,39 @@ class Tandem3T:
         """
         name = "CM"
         meastype = "CZ"
-        Isc3 = self.Isc3(meastype)  # find triple Voc point
-        ln = IV3T(name=name, meastype=meastype, area=self.lightarea)
-        lnout = IV3T(name=name, shape=0, meastype=meastype, area=self.lightarea)
-        x0 = 0
-        # sign = -1   #np.sign(Isc3.Iro[0]/Isc3.Ito[0])
-        # yconstraint = 'x'+ ' * (' + str(sign) + ')'
+        Isc3 = self.Isc3(meastype)
         yconstraint = "-x"
-        if abs(Isc3.Iro[0]) < abs(Isc3.Ito[0]):
-            xkey = "Ito"
-            x1 = Isc3.Ito[0]
-            ykey = "Iro"
+
+        def _scan_branch(xkey: str, x1_val: float, ykey: str) -> IV3T:
+            if not math.isfinite(x1_val):
+                return IV3T(name=name, shape=0, meastype=meastype, area=self.lightarea)
+            branch = self._line_search(name, meastype, xkey, 0.0, x1_val, ykey, yconstraint, pnts, self.V3T)
+
+            branch.sort(xkey)  # sort for nice line
+            ind = []
+            for i, Ptot in enumerate(branch.Ptot.flat):
+                if math.isfinite(Ptot):
+                    if Ptot / branch.area < 0.0 or np.isnan(Ptot / branch.area):
+                        ind.append(i)  # negative
+                else:  # not finite
+                    ind.append(i)
+            branch.delete(ind)
+            return branch
+
+        if self.top.pn == self.bot.pn:
+            # r-type: Ito > 0 (Iro < 0) and Iro > 0 (Ito < 0) are distinct half-lines;
+            # scan both so bottom-rich devices still find the generating branch.
+            ln_top = _scan_branch("Ito", float(Isc3.Ito[0]), "Iro")
+            ln_bot = _scan_branch("Iro", float(Isc3.Iro[0]), "Ito")
+            p_top = float(np.max(ln_top.Ptot)) if ln_top.shape[0] > 0 else -np.inf
+            p_bot = float(np.max(ln_bot.Ptot)) if ln_bot.shape[0] > 0 else -np.inf
+            lnout = ln_top if p_top >= p_bot else ln_bot
         else:
-            xkey = "Iro"
-            x1 = Isc3.Iro[0]
-            ykey = "Ito"
+            if abs(Isc3.Iro[0]) < abs(Isc3.Ito[0]):
+                lnout = _scan_branch("Ito", float(Isc3.Ito[0]), "Iro")
+            else:
+                lnout = _scan_branch("Iro", float(Isc3.Iro[0]), "Ito")
 
-        for i in range(4):  # focus on MPP
-            ln.line(xkey, x0, x1, pnts, ykey, yconstraint)
-            ln.name = name + "_" + str(i)
-            self.V3T(ln)
-            lnout.append(ln)
-            xln = getattr(ln, xkey)
-            nmax = np.argmax(ln.Ptot)
-            x0 = xln[max(0, (nmax - 1))]
-            x1 = xln[min((nmax + 1), (pnts - 1))]
-
-        lnout.sort(xkey)  # sort for nice line
-        # find useless values
-        ind = []
-        for i, Ptot in enumerate(lnout.Ptot.flat):
-            if math.isfinite(Ptot):
-                if Ptot / lnout.area < 0.0 or np.isnan(Ptot / lnout.area):
-                    ind.append(i)  # negative
-            else:  # not finite
-                ind.append(i)
-        lnout.delete(ind)  # delete extraneous points from lnout
         if lnout.shape[0] > 0:
             MPP = lnout.MPP(name)  # single MPP point in IV3T space
         else:
@@ -1225,13 +1320,19 @@ class Tandem3T:
         Isc3 = self.Isc3(meastype)
         Isct = Isc3.Ito[0]
         Iscr = Isc3.Iro[0]
-        if any(np.isnan([Isct, Iscr])):
+        if not (math.isfinite(Isct) and math.isfinite(Iscr)):
             VorI = "V"
+        if VorI == "V" and not (math.isfinite(Voc3.Vzt[0]) and math.isfinite(Voc3.Vrz[0])):
+            pt = IV3T(name="MPP", meastype=meastype, shape=1, area=self.lightarea)
+            pt.nanpnt(0)
+            pt.Pcalc()
+            return pt
         pnt = self.top.pn
         pnr = self.bot.pn
         tol = 1e-5
         # initial guesses
         Vmpr = 0.0
+        Vmpt = np.nan
         Impr = Iscr
         Impt = Isct
         # create IV3T classes for top and rear
@@ -1252,10 +1353,14 @@ class Tandem3T:
         for i in range(5):
             # iterate
             if VorI == "V":
-                lnt.line("Vzt", 0, Voc3.Vzt[0], pnts, "Vrz", str(Vmpr))
+                if not math.isfinite(Vmpr):
+                    break
+                lnt.line("Vzt", 0, Voc3.Vzt[0], pnts, "Vrz", repr(float(Vmpr)))
                 self.I3Trel(lnt)
             else:
-                lnt.line("Ito", Isct, Isct / less, pnts, "Iro", str(Impr))
+                if not math.isfinite(Impr):
+                    break
+                lnt.line("Ito", Isct, Isct / less, pnts, "Iro", repr(float(Impr)))
                 self.V3T(lnt)
             aPt = lnt.Ptot
             aVzt = lnt.Vzt
@@ -1270,10 +1375,14 @@ class Tandem3T:
                 print(i, "T", Vmpt, Impt, Pmpt)
 
             if VorI == "V":
-                lnr.line("Vrz", 0, Voc3.Vrz[0], pnts, "Vzt", str(Vmpt))
+                if not math.isfinite(Vmpt):
+                    break
+                lnr.line("Vrz", 0, Voc3.Vrz[0], pnts, "Vzt", repr(float(Vmpt)))
                 self.I3Trel(lnr)
             else:
-                lnr.line("Iro", Iscr, Iscr / less, pnts, "Ito", str(Impt))
+                if not math.isfinite(Impt):
+                    break
+                lnr.line("Iro", Iscr, Iscr / less, pnts, "Ito", repr(float(Impt)))
                 self.V3T(lnr)
             aPr = lnr.Ptot
             aVrz = lnr.Vrz
@@ -1307,26 +1416,73 @@ class Tandem3T:
 
         return pt
 
-    def efficiency(self, Pspec="global", xspec=None):
-        """Power-conversion efficiency under a reference spectrum.
+    @staticmethod
+    def _valid_iv3t_power(pt: IV3T) -> float:
+        """Return finite Ptot [W] for a 1-point IV3T, or np.nan if unsolved (-100 sentinel)."""
+        if pt.Ptot.size == 0:
+            return np.nan
+        if not (math.isfinite(float(pt.Iro.flat[0])) and math.isfinite(float(pt.Vzt.flat[0]))):
+            return np.nan
+        p = float(pt.Ptot.flat[0])
+        if not math.isfinite(p) or p == -100.0:
+            return np.nan
+        return p
 
-        For a 3T device MPP returns an IV3T point whose
-        absolute power is pt.Ptot[0] [W]. Efficiency normalises that
-        power by the incident power on the device footprint
-        (self.totalarea = max(top.totalarea, bot.totalarea)), matching
-        the convention used in EY.Meteo and
-        Multi2T.efficiency.
+    def _best_mpp_point(self, meastype: str = "CZ", bplot: bool = False) -> IV3T:
+        """Return the better of refined MPP_rows (when supported) and grid MPP()."""
+        pt_grid = self.MPP(bplot=bplot)
+        if meastype != "CZ":
+            pt_grid.Pcalc(meastype=meastype)
+        p_grid = self._valid_iv3t_power(pt_grid)
+
+        if junction._legacy_solver() or float(self.top.TC) != float(self.bot.TC):
+            return pt_grid
+
+        try:
+            pt_rows = self.MPP_rows(
+                np.array([float(self.TC)]),
+                np.array([[float(self.top.Eg), float(self.bot.Eg)]]),
+                np.array([[float(self.top.sigma), float(self.bot.sigma)]]),
+                np.array([[float(self.top.Jext), float(self.bot.Jext)]]),
+            )
+            if meastype != "CZ":
+                pt_rows.Pcalc(meastype=meastype)
+            p_rows = self._valid_iv3t_power(pt_rows)
+        except NotImplementedError:
+            return pt_grid
+
+        if math.isfinite(p_rows) and (not math.isfinite(p_grid) or p_rows > p_grid):
+            pt_rows.name = "MPP"
+            pt_rows.names = ["MPP"]
+            return pt_rows
+        return pt_grid
+
+    def efficiency(self, Pspec="global", xspec=None, Pin: float | None = None):
+        r"""Power-conversion efficiency under a reference spectrum.
+
+        Evaluates the maximum power point via the better of refined 'MPP_rows'
+        and 'MPP()' (falling back to 'MPP()' alone when 'MPP_rows' is not
+        applicable) and divides 'Ptot' by the incident power on the device
+        footprint ('self.totalarea = max(top.totalarea, bot.totalarea)'). Note
+        that 'Jext' on each junction is not modified and must already
+        correspond to *Pspec*.
 
         Parameters
         ----------
         Pspec : str or array-like, optional
-            Reference spectrum. Either an ASTM key recognised by
-            PintMD ('space', 'global',
+            Reference spectrum. Either an ASTM key ('space', 'global',
             'direct') or a spectral irradiance array [W/m^2/nm].
-            Default 'global' (AM1.5G, ~1000 W/m^2 \\approx 0.1 W/cm^2).
+            Default 'global' (AM1.5G, ~1000.4 W/m^2 \approx 0.1 W/cm^2).
+            For 'space' (AM0), the full-spectrum ASTM E490-00a solar constant
+            (1366.1 W/m^2) is used unless overridden by *Pin*, also when
+            *xspec* is given (the 280-4000 nm table integrates to only
+            1347.9 W/m^2).
         xspec : array-like, optional
             Wavelength grid [nm] for *Pspec*. Defaults to the ASTM
-            reference grid (pvcircuit.qe.wvl).
+            reference grid (pvcircuit.qe.wvl). Not used for 'space'.
+        Pin : float, optional
+            Explicit broadband incident irradiance [W/m^2] overriding
+            spectral integration.
 
         Returns
         -------
@@ -1338,17 +1494,31 @@ class Tandem3T:
         # imports tandem3T before qe.
         from pvcircuit import qe
 
-        if xspec is None:
-            Pin_Wm2 = qe.PintMD(Pspec)
+        if Pin is not None:
+            Pin_Wm2 = float(Pin)
+        elif isinstance(Pspec, str):
+            if Pspec not in qe.refnames:
+                raise ValueError(f"Unknown reference spectrum {Pspec!r}; expected one of {qe.refnames} or a spectral irradiance array.")
+            if Pspec == "space":
+                Pin_Wm2 = Multi2T.AM0_PIN_WM2
+            elif xspec is None:
+                Pin_Wm2 = float(qe.PintMD(Pspec))
+            else:
+                Pin_Wm2 = float(qe.PintMD(Pspec, xspec))
+        elif xspec is None:
+            Pin_Wm2 = float(qe.PintMD(Pspec))
         else:
-            Pin_Wm2 = qe.PintMD(Pspec, xspec)
-        Pin = np.asarray(Pin_Wm2, dtype=np.float64) / 1e4  # W/m^2 -> W/cm^2
+            Pin_Wm2 = float(qe.PintMD(Pspec, xspec))
 
-        pt = self.MPP()
-        Ptot = float(pt.Ptot[0])
+        if Pin_Wm2 <= 0.0 or not math.isfinite(Pin_Wm2):
+            raise ValueError(f"Incident irradiance Pin must be positive and finite, got {Pin_Wm2} W/m^2")
+        Pin_Wcm2 = Pin_Wm2 / 1e4  # W/m^2 -> W/cm^2
+
+        pt = self._best_mpp_point()
+        Ptot = self._valid_iv3t_power(pt)
         if not math.isfinite(Ptot):
             return np.nan
-        return float(Ptot / (Pin * self.totalarea))
+        return float(Ptot / (Pin_Wcm2 * self.totalarea))
 
     def VI0(self, VIname, meastype="CZ"):
         """
@@ -1393,17 +1563,18 @@ class Tandem3T:
             # bot to top LC?
 
         elif VIname == "VtrIzo":
-            ### does not work for r-type since Multi2T ignore pn #####
+            # For r-type (equal pn), series connection without Z current is not a
+            # generating 2T stack, so VtrIzo is left as NaN. On an unshunted
+            # mismatched s-type stack where the limiting junction saturates on a
+            # vertical branch, I2Troot returns the limiting current and V3T
+            # evaluates the corresponding non-zero Vtr on that vertical branch.
             pt.Izo[0] = 0.0  # series-connected 2T
             pt.Vtr[0] = 0.0
             if self.top.pn == self.bot.pn:  # r-type
-                # pt=self.VIpoint('Izo','Ito','Vtr',meastype=meastype, bplot=True)
-                # pt=self.VIpoint('Vtr','Vzt','Izo',meastype=meastype, bplot=True)
-                # pt=self.VIpoint('Vtr','Vrz','Izo',meastype=meastype)
                 pt.nanpnt(0)
             else:  # s-type
                 dev2T = Multi2T.from_3T(self)
-                pt.Iro[0] = dev2T.I2Troot(pt.Vtr[0])
+                pt.Iro[0] = dev2T.I2Troot(pt.Vtr[0]) * self.bot.pn
                 pt.Ito[0] = -pt.Iro[0]
             self.V3T(pt)  # calc Vs from Is
 
@@ -1523,7 +1694,7 @@ class Tandem3T:
 
         # MPP
         if not fast:
-            sp.append(self.MPP(bplot=bplot))
+            sp.append(self._best_mpp_point(meastype=meastype, bplot=bplot))
 
         return sp
 
