@@ -4,7 +4,7 @@ Package to simulate energy yield
 
 import copy
 import multiprocessing as mp
-from typing import Tuple, Union
+from typing import Literal, Tuple, Union
 
 import numpy as np  # arrays
 import pandas as pd
@@ -857,7 +857,7 @@ class Meteo:
         """
         return self._apply_row_mask(np.asarray(filter_array, dtype=bool))
 
-    def reindex(self, index: pd.Index, method: str = "nearest", tolerance: pd.Timedelta | None = None) -> "Meteo":
+    def reindex(self, index: pd.Index, method: Literal["backfill", "bfill", "ffill", "pad", "nearest"] = "nearest", tolerance: pd.Timedelta | None = None) -> "Meteo":
         """
         Reindex the data according to the provided strictly increasing time indexer.
 

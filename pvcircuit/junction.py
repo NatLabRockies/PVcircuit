@@ -59,7 +59,7 @@ XRTOL_MPP = 3e-6
 #   "legacy" - the Brent root finders, the stepping Multi2T.I2T and the
 #              timestep-by-timestep run_ey used before
 # Change it at run time: pvcircuit.junction.SOLVER = "legacy"
-SOLVER = "fast"
+SOLVER: str = "fast"
 SOLVERS = ("fast", "legacy")
 
 
@@ -933,7 +933,7 @@ class Junction:
         self.sigma = np.float64(sigma)  #: [eV] junction band gap sigma (Urbach tail width)
         self.TC = np.float64(TC)  #: [\degC] junction temperature (use the ``TK`` property for Kelvin)
         self.Jext = np.float64(Jext)  #: [A/cm^2] external photocurrent density (printed as mA/cm^2)
-        self.Gsh = np.float64(Gsh)  #: [S/cm^2] shunt conductance (= 1/Rsh, area-normalised)
+        self.Gsh: float = np.float64(Gsh)  #: [S/cm^2] shunt conductance (= 1/Rsh, area-normalised)
         self.Rser = np.float64(Rser)  #: [\Omega*cm^2] series resistance (area-normalised, so ``Vdrop = Rser * J``)
         self.lightarea = np.float64(area)  #: [cm^2] illuminated junction area
         self.totalarea = np.float64(area)  #: [cm^2] total junction area including shaded regions

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy import constants
-from typing import Union
+from typing import Union, overload
 
 # Physical constants (units are given in the docstring below each constant).
 K_Q = constants.k / constants.e
@@ -18,28 +18,36 @@ r"""[A/(cm^2*K^3)] Detailed-balance prefactor 2\pi*e*(k/h)^3/c^2 with the traili
 the radiative saturation current density. Value \approx 1.0133e-8 A/(cm^2*K^3)."""
 
 
-def TK(TC: float) -> float:
+@overload
+def TK(TC: float) -> float: ...
+@overload
+def TK(TC: np.ndarray) -> np.ndarray: ...
+def TK(TC: float | np.ndarray) -> float | np.ndarray:
     """
     Convert temperature from Celsius to Kelvin.
 
     Args:
-        TC (float): Temperature in Celsius.
+        TC (float or np.ndarray): Temperature in Celsius.
 
     Returns:
-        float: Temperature in Kelvin.
+        float or np.ndarray: Temperature in Kelvin (same type as TC).
     """
     return TC + constants.zero_Celsius
 
 
-def Vth(TC: float) -> float:
+@overload
+def Vth(TC: float) -> float: ...
+@overload
+def Vth(TC: np.ndarray) -> np.ndarray: ...
+def Vth(TC: float | np.ndarray) -> float | np.ndarray:
     """
     Calculate the thermal voltage.
 
     Args:
-        TC (float): Temperature in Celsius.
+        TC (float or np.ndarray): Temperature in Celsius.
 
     Returns:
-        float: Thermal voltage.
+        float or np.ndarray: Thermal voltage (same type as TC).
     """
     return K_Q * TK(TC)
 

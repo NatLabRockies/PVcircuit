@@ -130,7 +130,7 @@ def _jdb_from_eqe_columns(
     if Eguess is None:
         user_guesses = None
     elif np.ndim(Eguess) == 0:
-        user_guesses = np.full(njuncs, float(Eguess), dtype=np.float64)
+        user_guesses = np.full(njuncs, Eguess, dtype=np.float64)
     else:
         user_guesses = np.asarray(Eguess, dtype=np.float64).ravel()
         if user_guesses.size != njuncs:
@@ -1303,7 +1303,7 @@ class EQET(EQE):
     def get_current_for_temperature(
         self,
         target_temperature: float | Sequence[float] | np.ndarray,
-        degrees: int | Sequence[int] | str | None = None,
+        degrees: int | Sequence[int] | np.ndarray | str | None = None,
     ) -> np.ndarray:
         r"""Calculate short-circuit current density J(T) [mA/cm^2] for each target temperature.
 
@@ -1316,7 +1316,7 @@ class EQET(EQE):
           temperatures.
         - 'degrees=d' (int): polynomial fit of degree 'min(d, n_unique - 1)' in
           centered/scaled temperature.
-        - 'degrees=[...]' (sequence of ints): selects the lowest leave-one-out
+        - 'degrees=[...]' (sequence or array of ints): selects the lowest leave-one-out
           cross-validation MSE among candidate degrees capped at
           'max(1, n_unique - 2)' so exact-interpolant overfitting is excluded.
         """
@@ -1470,7 +1470,7 @@ class EQET(EQE):
         sr = self.eqe.T / np.asarray(convert.wavelength_to_photonenergy(self.wavelength.flatten()))
         return sr.T
 
-    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: float | np.ndarray = 25, sjuncs: str | None = None) -> None:  # ty: ignore[invalid-method-override]
+    def add_eqe(self, wavelength_add: np.ndarray, eqe_add: np.ndarray, temperature_add: float | np.ndarray = 25, sjuncs: str | None = None) -> None:  # ty: ignore[incompatible-method-override]
         """
         Add EQE(T)
 
@@ -1487,7 +1487,7 @@ class EQET(EQE):
         self.temperature = np.concatenate((self.temperature, temperature_add))
         self._sort_by_temperature()
 
-    def plot(self, fig: plt.Figure | None = None, ax: plt.Axes | None = None) -> tuple[plt.Axes, plt.Axes]:  # ty: ignore[invalid-method-override]
+    def plot(self, fig: plt.Figure | None = None, ax: plt.Axes | None = None) -> tuple[plt.Axes, plt.Axes]:  # ty: ignore[incompatible-method-override]
         """
         Plot the EQE(T). Lines are colored by temperature.
 
@@ -1750,7 +1750,7 @@ def _model_residuals(params: tuple[float, ...], func: Callable, x: np.ndarray, y
     return weights * (y - predicted).ravel()
 
 
-def _calc_mic(temperature: np.ndarray, predicted: np.ndarray, actual: np.ndarray, params: Sequence[float]) -> tuple[float, float]:
+def _calc_mic(temperature: np.ndarray, predicted: np.ndarray, actual: np.ndarray, params: np.ndarray) -> tuple[float, float]:
     """Calculate small-sample corrected AIC (AICc) and MSE.
 
     Returns 'inf' for models with 'n - k - 1 <= 0' (exact/near-exact fits) so
